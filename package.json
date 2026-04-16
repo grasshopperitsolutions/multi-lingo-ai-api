@@ -1,0 +1,8 @@
+{
+  "name": "multi-lingo-ai-api",
+  "version": "1.0.0",
+  "dependencies": {
+    "firebase-admin": "^13.6.1",
+    "cors": "^2.8.5"
+  }
+}
