@@ -1,27 +1,27 @@
-import Cors from 'cors';
-
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [];
 
-export const cors = Cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Authorization', 'Content-Type']
-});
+export function setCorsHeaders(res: any) {
+  const origin = res.req?.headers?.origin || '*';
+  
+  if (allowedOrigins.includes(origin) || !process.env.ALLOWED_ORIGINS) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigins[0] || '*');
+  }
+  
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
+}
 
-export function runMiddleware(req: any, res: any, fn: any) {
-  return new Promise((resolve, reject) => {
-    fn(req, res, (result: any) => {
-      if (result instanceof Error) {
-        return reject(result);
-      }
-      return resolve(result);
-    });
-  });
+export function handleCors(req: any, res: any): boolean {
+  setCorsHeaders(res);
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200).end();
+    return true;
+  }
+  
+  return false;
 }

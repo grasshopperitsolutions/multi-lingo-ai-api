@@ -1,14 +1,13 @@
-import { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../../lib/types';
 import { storage, db, FieldValue } from '../../lib/firebase-admin';
-import { cors, runMiddleware } from '../../lib/cors';
+import { handleCors, setCorsHeaders } from '../../lib/cors';
 import { successResponse, errorResponse } from '../../lib/response';
 
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  await runMiddleware(req, res, cors);
+  setCorsHeaders(res);
   
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (handleCors(req, res)) return;
 
   if (req.method !== 'POST') {
     return errorResponse(res, 'Method not allowed', 405);
@@ -29,7 +28,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Generate signed upload URL
     const [uploadUrl] = await file.getSignedUrl({
       action: 'write',
-      expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+      expires: Date.now() + 15 * 60 * 1000,
       contentType: contentType
     });
 

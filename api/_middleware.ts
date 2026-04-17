@@ -1,60 +1,56 @@
-import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '../lib/firebase-admin';
+import { setCorsHeaders } from '../lib/cors';
+import type { VercelRequest, VercelResponse } from '../lib/types';
 
-const PUBLIC_ROUTES = [
+// Public endpoints that don't require authentication
+const publicPaths = [
   '/api/auth/login',
   '/api/auth/register',
   '/api/auth/google',
   '/api/auth/apple',
   '/api/auth/facebook',
   '/api/auth/twitter',
-  '/api/auth/refresh-token',
-  '/api/auth/verify-email',
-  '/api/auth/reset-password'
+  '/api/auth/reset-password',
+  '/api/auth/verify-email'
 ];
 
-export async function middleware(request: NextRequest) {
-  const path = request.nextUrl.pathname;
-  
-  // Allow public routes without authentication
-  if (PUBLIC_ROUTES.some(route => path.startsWith(route))) {
-    return NextResponse.next();
+export default async function middleware(req: VercelRequest, res: VercelResponse, next: () => void) {
+  setCorsHeaders(res);
+
+  // Skip authentication for OPTIONS requests and public endpoints
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200).end();
+    return;
   }
 
-  // Handle OPTIONS preflight requests
-  if (request.method === 'OPTIONS') {
-    return new NextResponse(null, { status: 200 });
+  const url = req.url || '';
+  if (publicPaths.some(path => url.startsWith(path))) {
+    next();
+    return;
   }
-
-  // Verify Authorization header
-  const authHeader = request.headers.get('authorization');
-  
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return new NextResponse(JSON.stringify({ error: 'Unauthorized' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  const idToken = authHeader.split('Bearer ')[1];
 
   try {
-    const decodedToken = await auth.verifyIdToken(idToken);
-    
-    // Attach user data to request headers for downstream use
-    const requestHeaders = new Headers(request.headers);
-    requestHeaders.set('x-user-id', decodedToken.uid);
-    requestHeaders.set('x-user-email', decodedToken.email || '');
+    const authHeader = req.headers.authorization;
 
-    return NextResponse.next({
-      request: {
-        headers: requestHeaders,
-      },
-    });
-  } catch (error) {
-    return new NextResponse(JSON.stringify({ error: 'Invalid or expired token' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' }
-    });
+    if (!authHeader) {
+      res.writeHead(401).json({ error: 'Authorization header is required' });
+      return;
+    }
+
+    const token = authHeader.split('Bearer ')[1];
+
+    if (!token) {
+      res.writeHead(401).json({ error: 'Bearer token is required' });
+      return;
+    }
+
+    const decodedToken = await auth.verifyIdToken(token);
+
+    // Add user ID to request headers
+    req.headers['x-user-id'] = decodedToken.uid;
+
+    next();
+  } catch (error: any) {
+    res.writeHead(401).json({ error: error.message || 'Invalid or expired token' });
   }
 }
