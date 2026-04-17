@@ -1,121 +1,274 @@
-# Multi Lingo AI API
+# Multi-Lingo AI API
 
-Vercel Serverless Functions API with Firebase Authentication, Firestore and Storage.
-
-## Features
-
-✅ **Authentication**
-- Email / Password login & registration
-- Google, Apple, Facebook, X (Twitter) OAuth login
-- Token refresh, email verification, password reset
-- Global authentication middleware
-
-✅ **Firestore Database**
-- Generic CRUD endpoints for any collection
-- Query support with filtering, sorting, pagination
-- Automatic audit fields (createdBy, createdAt, updatedAt)
-
-✅ **Storage**
-- Upload any file type
-- Update and delete files
-- Signed URLs for secure access
-- File metadata tracking
-
-✅ **Security**
-- Proper CORS policy with origin whitelisting
-- JWT token verification on all protected routes
-- Input validation
-- Standardized error responses
-
-## Getting Started
-
-1. Copy `.env.example` to `.env` and fill in your Firebase credentials
-2. Install dependencies: `npm install`
-3. Deploy to Vercel or run locally with `vercel dev`
+A consolidated API service for authentication, Firestore operations, and storage management using Firebase Admin SDK with Vercel serverless functions.
 
 ## API Endpoints
 
-### Authentication
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/auth/register` | Register new user with email/password |
-| POST | `/api/auth/login` | Login with email/password |
-| POST | `/api/auth/google` | Google OAuth login |
-| POST | `/api/auth/apple` | Apple OAuth login |
-| POST | `/api/auth/facebook` | Facebook OAuth login |
-| POST | `/api/auth/twitter` | X (Twitter) OAuth login |
-| POST | `/api/auth/logout` | Logout and revoke tokens |
-| POST | `/api/auth/refresh-token` | Refresh authentication token |
-| POST | `/api/auth/verify-email` | Verify email address |
-| POST | `/api/auth/reset-password` | Request or confirm password reset |
+This API has been consolidated into **3 main endpoints**:
 
-### Storage
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/storage/upload` | Generate signed upload URL |
-| PUT | `/api/storage/update` | Update existing file |
-| DELETE | `/api/storage/delete` | Delete file |
-| GET/POST | `/api/storage/signed-url` | Generate temporary access URL |
+### 1. Authentication - `POST /api/auth`
 
-### Firestore
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/firestore/create` | Create document in any collection |
-| GET | `/api/firestore/read` | Get document by ID |
-| PUT | `/api/firestore/update` | Update document |
-| DELETE | `/api/firestore/delete` | Delete document |
-| POST | `/api/firestore/query` | Query collection with filters |
+Handles all authentication operations via an `action` parameter in the request body.
 
-### Users
-| Method | Path | Description |
-|--------|------|-------------|
-| GET/PUT | `/api/users/profile` | Get or update user profile |
-| GET/PUT | `/api/users/settings` | Get or update user settings |
+#### Actions:
+
+**Login**
+```json
+POST /api/auth
+{
+  "action": "login",
+  "email": "user@example.com",
+  "password": "password123"
+}
+```
+
+**Register**
+```json
+POST /api/auth
+{
+  "action": "register",
+  "email": "user@example.com",
+  "password": "password123",
+  "displayName": "John Doe",
+  "photoURL": "https://example.com/photo.jpg"
+}
+```
+
+**Social Login (Google, Apple, Facebook, Twitter)**
+```json
+POST /api/auth
+{
+  "action": "google", // or "apple", "facebook", "twitter"
+  "idToken": "id_token_from_provider"
+}
+```
+
+**Logout**
+```json
+POST /api/auth
+{
+  "action": "logout"
+}
+```
+
+**Verify Email**
+```json
+POST /api/auth
+{
+  "action": "verify-email",
+  "oobCode": "oob_code_from_email"
+}
+```
+
+**Reset Password**
+```json
+POST /api/auth
+{
+  "action": "reset-password",
+  "oobCode": "oob_code_from_email",
+  "newPassword": "newSecurePassword123"
+}
+```
+
+**Refresh Token**
+```json
+POST /api/auth
+{
+  "action": "refresh-token",
+  "refreshToken": "refresh_token"
+}
+```
+
+### 2. Firestore - `/api/firestore`
+
+Handles all Firestore CRUD operations via HTTP methods.
+
+**Authentication Required**: Yes (except for public collections if configured)
+
+#### Create Document
+```http
+POST /api/firestore
+Authorization: Bearer <token>
+{
+  "collection": "users",
+  "data": {
+    "name": "John Doe",
+    "email": "john@example.com"
+  },
+  "id": "optional_custom_id" // Optional: if not provided, Firestore will auto-generate
+}
+```
+
+#### Read Single Document
+```http
+GET /api/firestore?collection=users&id=user123
+Authorization: Bearer <token>
+```
+
+#### Query Documents
+```http
+GET /api/firestore?collection=users&query={"status":"active"}&orderBy=createdAt&order=desc&limit=20
+Authorization: Bearer <token>
+```
+
+Query parameters:
+- `collection` (required): The collection to query
+- `query` (optional): JSON string of filter conditions
+- `orderBy` (optional): Field to order by (default: createdAt)
+- `order` (optional): Order direction - 'asc' or 'desc' (default: desc)
+- `limit` (optional): Number of documents to return (default: 20, max: 100)
+- `startAfter` (optional): Document ID for pagination
+
+#### Update Document
+```http
+PUT /api/firestore
+Authorization: Bearer <token>
+{
+  "collection": "users",
+  "id": "user123",
+  "data": {
+    "name": "Jane Doe"
+  }
+}
+```
+
+#### Delete Document
+```http
+DELETE /api/firestore
+Authorization: Bearer <token>
+{
+  "collection": "users",
+  "id": "user123"
+}
+```
+
+### 3. Storage - `/api/storage`
+
+Handles all file storage operations via HTTP methods.
+
+**Authentication Required**: Yes
+
+#### Upload File (Generate Signed URL)
+```http
+POST /api/storage
+Authorization: Bearer <token>
+{
+  "fileName": "document.pdf",
+  "contentType": "application/pdf",
+  "folder": "documents", // Optional: defaults to 'uploads'
+  "metadata": {
+    "description": "Important document"
+  }
+}
+```
+
+Response includes a signed URL for direct upload to storage.
+
+#### Get Signed Download URL
+```http
+GET /api/storage?fileId=file123&expiresIn=3600
+Authorization: Bearer <token>
+```
+
+#### Update File Metadata
+```http
+PUT /api/storage
+Authorization: Bearer <token>
+{
+  "fileId": "file123",
+  "fileName": "updated-document.pdf", // Optional: if provided, will upload new content
+  "contentType": "application/pdf",
+  "metadata": {
+    "description": "Updated description"
+  }
+}
+```
+
+#### Delete File
+```http
+DELETE /api/storage
+Authorization: Bearer <token>
+{
+  "fileId": "file123"
+}
+```
+
+## User Data Management
+
+User profiles and settings are now managed through the generic Firestore endpoint:
+
+#### Get User Profile
+```http
+GET /api/firestore?collection=users&id={userId}
+Authorization: Bearer <token>
+```
+
+#### Update User Profile
+```http
+PUT /api/firestore
+Authorization: Bearer <token>
+{
+  "collection": "users",
+  "id": "{userId}",
+  "data": {
+    "displayName": "Updated Name",
+    "photoURL": "https://new-photo.jpg",
+    "settings": {
+      "language": "en",
+      "notifications": {
+        "email": true,
+        "push": false
+      }
+    }
+  }
+}
+```
+
+## Authentication
+
+All endpoints except `/api/auth` require authentication via Firebase ID token.
+
+**Headers:**
+```
+Authorization: Bearer <firebase_id_token>
+```
+
+The middleware automatically:
+1. Verifies the Firebase ID token
+2. Extracts the user ID
+3. Adds it to `x-user-id` header for authorized operations
+
+## CORS
+
+CORS is enabled for all endpoints with configurable allowed origins via the `ALLOWED_ORIGINS` environment variable.
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` and configure:
+Required environment variables:
+- `FIREBASE_PROJECT_ID`: Firebase project ID
+- `FIREBASE_CLIENT_EMAIL`: Firebase service account client email
+- `FIREBASE_PRIVATE_KEY`: Firebase service account private key
+- `FIREBASE_STORAGE_BUCKET`: Firebase storage bucket name
+- `ALLOWED_ORIGINS`: Comma-separated list of allowed origins (optional)
 
-```env
-# Firebase Admin Configuration
-FIREBASE_PROJECT_ID=your-project-id
-FIREBASE_CLIENT_EMAIL=firebase-adminsdk@your-project.iam.gserviceaccount.com
-FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-FIREBASE_STORAGE_BUCKET=your-project.appspot.com
+## Deployment
 
-# CORS Configuration
-ALLOWED_ORIGINS=http://localhost:3000,https://your-domain.com
+This API is designed for Vercel serverless deployment. Each endpoint is a separate serverless function with:
+- Memory: 1024MB
+- Max Duration: 10 seconds
 
-# Optional
-PASSWORD_RESET_URL=https://your-app.com/reset-password
-```
+## Security
 
-## Usage Examples
+- All sensitive operations require Firebase authentication
+- User data is protected by ownership checks
+- File access is restricted to file owners
+- CORS headers are properly configured
+- Rate limiting can be added via Vercel configuration
 
-### Register a new user
-```bash
-curl -X POST https://your-api.vercel.app/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com", "password": "securepassword"}'
-```
+## Migration Notes
 
-### Upload a file
-```bash
-# 1. Get signed upload URL
-curl -X POST https://your-api.vercel.app/api/storage/upload \
-  -H "Authorization: Bearer YOUR_ID_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"fileName": "photo.jpg", "contentType": "image/jpeg"}'
-
-# 2. Upload file to the returned signed URL
-curl -X PUT "<signed-url>" \
-  -H "Content-Type: image/jpeg" \
-  --data-binary @photo.jpg
-```
-
-### Create a document
-```bash
-curl -X POST https://your-api.vercel.app/api/firestore/create \
-  -H "Authorization: Bearer YOUR_ID_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"collection": "translations", "data": {"text": "Hello", "language": "en"}}'
+This API has been consolidated from multiple individual endpoints into 3 main endpoints for better maintainability and scalability. The old endpoints have been removed:
+- All auth operations are now in `/api/auth`
+- All Firestore operations are now in `/api/firestore`
+- All storage operations are now in `/api/storage`
+- User profile and settings are accessed via the Firestore endpoint

@@ -4,14 +4,7 @@ import type { VercelRequest, VercelResponse } from '../lib/types';
 
 // Public endpoints that don't require authentication
 const publicPaths = [
-  '/api/auth/login',
-  '/api/auth/register',
-  '/api/auth/google',
-  '/api/auth/apple',
-  '/api/auth/facebook',
-  '/api/auth/twitter',
-  '/api/auth/reset-password',
-  '/api/auth/verify-email'
+  '/api/auth'
 ];
 
 export default async function middleware(req: VercelRequest, res: VercelResponse, next: () => void) {
