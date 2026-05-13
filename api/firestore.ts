@@ -130,6 +130,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'collection, id and data are required', 400);
         }
 
+        // Users can only update their own profile document
+        if (collection === 'users' && id !== userId) {
+          return errorResponse(res, 'Unauthorized: you can only update your own profile', 403);
+        }
+
         const docRef = db.collection(collection).doc(id);
         const doc = await docRef.get();
 
@@ -137,10 +142,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'Document not found', 404);
         }
 
-        // Check ownership if document has createdBy field
-        const docData = doc.data();
-        if (docData && docData.createdBy && docData.createdBy !== userId) {
-          return errorResponse(res, 'Unauthorized to update this document', 403);
+        // For non-user collections, check createdBy ownership
+        if (collection !== 'users') {
+          const docData = doc.data();
+          if (docData && docData.createdBy && docData.createdBy !== userId) {
+            return errorResponse(res, 'Unauthorized to update this document', 403);
+          }
         }
 
         const updateData = {
