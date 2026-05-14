@@ -2,13 +2,16 @@ import type { VercelRequest, VercelResponse } from '../lib/types';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
+import { verifyAuth } from '../lib/verify-auth';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
   
   if (handleCors(req, res)) return;
 
-  const userId = req.headers['x-user-id'] as string;
+  // Skip token verification for OPTIONS (handled above by handleCors)
+  const userId = await verifyAuth(req, res);
+  if (!userId) return; // 401 already sent
 
   try {
     switch (req.method) {
