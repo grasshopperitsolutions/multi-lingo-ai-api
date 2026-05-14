@@ -39,7 +39,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // Verify the ID token issued by Firebase client SDK
         const decodedToken = await auth.verifyIdToken(idToken);
 
-        // Check if user already exists; if not, create them (first-time registration)
+        // Get or create the Firebase Auth user record
         let userRecord;
         try {
           userRecord = await auth.getUser(decodedToken.uid);
@@ -51,16 +51,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             photoURL: decodedToken.picture,
             emailVerified: decodedToken.email_verified
           });
+        }
 
-          // Create user profile in Firestore on first sign-in
-          await db.collection('users').doc(userRecord.uid).set({
+        // Check if the Firestore doc already exists
+        const userDocRef = db.collection('users').doc(userRecord.uid);
+        const userDocSnap = await userDocRef.get();
+
+        if (!userDocSnap.exists) {
+          // First login: create full profile with defaults
+          await userDocRef.set({
             email: userRecord.email,
-            displayName: userRecord.displayName,
-            photoURL: userRecord.photoURL,
+            displayName: userRecord.displayName || decodedToken.name || '',
+            photoURL: userRecord.photoURL || decodedToken.picture || null,
             emailVerified: userRecord.emailVerified,
             provider: action,
+            interfaceLang: 'en',
+            theme: 'light',
             createdAt: FieldValue.serverTimestamp(),
-            updatedAt: FieldValue.serverTimestamp()
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+        } else {
+          // Returning user: refresh social fields only, preserve user preferences
+          await userDocRef.update({
+            displayName: userRecord.displayName || decodedToken.name || '',
+            photoURL: userRecord.photoURL || decodedToken.picture || null,
+            emailVerified: userRecord.emailVerified,
+            updatedAt: FieldValue.serverTimestamp(),
           });
         }
 
@@ -70,8 +86,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return successResponse(res, {
           uid: userRecord.uid,
           email: userRecord.email,
-          displayName: userRecord.displayName,
-          photoURL: userRecord.photoURL,
+          displayName: userRecord.displayName || decodedToken.name || '',
+          photoURL: userRecord.photoURL || decodedToken.picture || null,
           customToken
         });
       }
