@@ -2,18 +2,19 @@ import type { VercelRequest, VercelResponse } from '../lib/types';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
+import { verifyAuth } from '../lib/verify-auth';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
-  
-  if (handleCors(req, res)) return;
 
-  const userId = req.headers['x-user-id'] as string;
+  if (handleCors(req, res)) return;
 
   try {
     switch (req.method) {
       case 'POST': {
-        // Create document
+        const uid = await verifyAuth(req, res);
+        if (!uid) return;
+
         const { collection, data, id } = req.body;
 
         if (!collection || !data) {
@@ -22,13 +23,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         const documentData = {
           ...data,
-          createdBy: userId,
+          createdBy: uid,
           createdAt: FieldValue.serverTimestamp(),
           updatedAt: FieldValue.serverTimestamp()
         };
 
         let docRef;
-        
+
         if (id) {
           docRef = db.collection(collection).doc(id);
           await docRef.set(documentData);
@@ -46,7 +47,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const { collection, id, query } = req.query;
 
         if (query) {
-          // Query documents
           const filters = typeof query === 'string' ? JSON.parse(query) : query;
           const orderBy = (req.query.orderBy as string) || 'createdAt';
           const order = (req.query.order as string) || 'desc';
@@ -59,21 +59,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           let firestoreQuery: any = db.collection(collection as string);
 
-          // Apply filters
           if (typeof filters === 'object') {
             Object.entries(filters).forEach(([field, value]) => {
               firestoreQuery = firestoreQuery.where(field, '==', value);
             });
           }
 
-          // Apply ordering
           firestoreQuery = firestoreQuery.orderBy(orderBy, order);
 
-          // Apply pagination
           const pageSize = Math.min(limit, 100);
           firestoreQuery = firestoreQuery.limit(pageSize);
 
-          // Handle startAfter for pagination
           if (startAfter) {
             firestoreQuery = firestoreQuery.startAfter(startAfter);
           }
@@ -102,7 +98,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             lastDocumentId: lastVisible ? lastVisible.id : null
           });
         } else {
-          // Read single document
           if (!collection || !id) {
             return errorResponse(res, 'collection and id are required as query parameters', 400);
           }
@@ -123,19 +118,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       case 'PUT': {
-        // Update document
+        const uid = await verifyAuth(req, res);
+        if (!uid) return;
+
         const { collection, id, data } = req.body;
 
         if (!collection || !id || !data) {
           return errorResponse(res, 'collection, id and data are required', 400);
         }
 
-        // ⚠️ DO NOT REMOVE — kept for reference in case role-based access control (RBAC) is introduced in the future.
-        // This guard is currently commented out because authentication via the middleware already
-        // ensures only the logged-in user can send requests. The uid in the payload always matches
-        // the authenticated session, making this check redundant and causing false 403 errors.
-        //
-        // if (collection === 'users' && id !== userId) {
+        // ⚠️ DO NOT REMOVE — kept for reference in case RBAC is introduced in the future.
+        // if (collection === 'users' && id !== uid) {
         //   return errorResponse(res, 'Unauthorized: you can only update your own profile', 403);
         // }
 
@@ -146,17 +139,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'Document not found', 404);
         }
 
-        // For non-user collections, check createdBy ownership
         if (collection !== 'users') {
           const docData = doc.data();
-          if (docData && docData.createdBy && docData.createdBy !== userId) {
+          if (docData && docData.createdBy && docData.createdBy !== uid) {
             return errorResponse(res, 'Unauthorized to update this document', 403);
           }
         }
 
         const updateData = {
           ...data,
-          updatedBy: userId,
+          updatedBy: uid,
           updatedAt: FieldValue.serverTimestamp()
         };
 
@@ -170,7 +162,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       case 'DELETE': {
-        // Delete document
+        const uid = await verifyAuth(req, res);
+        if (!uid) return;
+
         const { collection, id } = req.body;
 
         if (!collection || !id) {
@@ -184,9 +178,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'Document not found', 404);
         }
 
-        // Check ownership if document has createdBy field
         const docData = doc.data();
-        if (docData && docData.createdBy && docData.createdBy !== userId) {
+        if (docData && docData.createdBy && docData.createdBy !== uid) {
           return errorResponse(res, 'Unauthorized to delete this document', 403);
         }
 
