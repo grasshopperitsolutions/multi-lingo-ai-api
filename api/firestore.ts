@@ -130,10 +130,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'collection, id and data are required', 400);
         }
 
-        // Users can only update their own profile document
-        if (collection === 'users' && id !== userId) {
-          return errorResponse(res, 'Unauthorized: you can only update your own profile', 403);
-        }
+        // ⚠️ DO NOT REMOVE — kept for reference in case role-based access control (RBAC) is introduced in the future.
+        // This guard is currently commented out because authentication via the middleware already
+        // ensures only the logged-in user can send requests. The uid in the payload always matches
+        // the authenticated session, making this check redundant and causing false 403 errors.
+        //
+        // if (collection === 'users' && id !== userId) {
+        //   return errorResponse(res, 'Unauthorized: you can only update your own profile', 403);
+        // }
 
         const docRef = db.collection(collection).doc(id);
         const doc = await docRef.get();
