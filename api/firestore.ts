@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from '../lib/types';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
+import { verifyAuth } from '../lib/verify-auth';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
@@ -123,6 +124,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       case 'PUT': {
+        // Verify the caller's identity via Bearer token
+        const uid = await verifyAuth(req, res);
+        if (!uid) return;
+
         // Update document
         const { collection, id, data } = req.body;
 
@@ -135,7 +140,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // ensures only the logged-in user can send requests. The uid in the payload always matches
         // the authenticated session, making this check redundant and causing false 403 errors.
         //
-        // if (collection === 'users' && id !== userId) {
+        // if (collection === 'users' && id !== uid) {
         //   return errorResponse(res, 'Unauthorized: you can only update your own profile', 403);
         // }
 
@@ -149,14 +154,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // For non-user collections, check createdBy ownership
         if (collection !== 'users') {
           const docData = doc.data();
-          if (docData && docData.createdBy && docData.createdBy !== userId) {
+          if (docData && docData.createdBy && docData.createdBy !== uid) {
             return errorResponse(res, 'Unauthorized to update this document', 403);
           }
         }
 
         const updateData = {
           ...data,
-          updatedBy: userId,
+          updatedBy: uid,
           updatedAt: FieldValue.serverTimestamp()
         };
 
