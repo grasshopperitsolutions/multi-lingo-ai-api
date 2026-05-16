@@ -25,6 +25,9 @@
   "functions": {
     "api/**/*.ts": {
       "maxDuration": 10
+    },
+    "api/user.ts": {
+      "maxDuration": 30
     }
   }
 }
