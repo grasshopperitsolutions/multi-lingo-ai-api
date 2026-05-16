@@ -26,7 +26,7 @@
     "api/**/*.ts": {
       "maxDuration": 10
     },
-    "api/user.ts": {
+    "api/auth.ts": {
       "maxDuration": 30
     }
   }
