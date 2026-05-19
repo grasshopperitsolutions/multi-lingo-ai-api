@@ -233,10 +233,10 @@ All endpoints except `/api/auth` require authentication via Firebase ID token.
 Authorization: Bearer <firebase_id_token>
 ```
 
-The middleware automatically:
-1. Verifies the Firebase ID token
-2. Extracts the user ID
-3. Adds it to `x-user-id` header for authorized operations
+Each endpoint handler uses `lib/verify-auth.ts` to:
+1. Verify the Firebase ID token from the `Authorization` header
+2. Return the authenticated user's UID for the handler to use
+3. Respond with `401 Unauthorized` if the token is invalid or missing
 
 ## CORS
 
