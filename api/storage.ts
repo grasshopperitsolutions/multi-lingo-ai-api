@@ -4,6 +4,16 @@ import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
 
+// Keys allowed inside the metadata object written to Firestore.
+// Never spread raw client input — a caller could inject userId, status, etc.
+const ALLOWED_METADATA_KEYS = ['description', 'tags', 'altText', 'originalName'];
+
+function sanitizeMetadata(raw: Record<string, unknown> = {}): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(raw).filter(([key]) => ALLOWED_METADATA_KEYS.includes(key))
+  );
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
 
@@ -24,29 +34,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const bucket = storage.bucket();
         const filePath = `${folder}/${uid}/${Date.now()}_${fileName}`;
         const file = bucket.file(filePath);
+        const isAvatar = folder === 'avatars';
 
-        const [uploadUrl] = await file.getSignedUrl({
+        // Build signed URL options.
+        // For avatars: include x-goog-acl: public-read so the browser PUT
+        // sets the object ACL to public at upload time. This makes publicUrl
+        // directly usable in <img> tags without any auth.
+        const signedUrlOptions: Parameters<typeof file.getSignedUrl>[0] = {
           action: 'write',
-          expires: Date.now() + 15 * 60 * 1000,
-          contentType: contentType
-        });
-
-        const fileRef = await db.collection('files').add({
-          userId: uid,
-          fileName,
+          expires: Date.now() + 15 * 60 * 1000, // 15 minutes
           contentType,
-          filePath,
-          folder,
-          metadata,
-          status: 'pending',
-          createdAt: FieldValue.serverTimestamp()
-        });
+          ...(isAvatar && {
+            extensionHeaders: { 'x-goog-acl': 'public-read' },
+          }),
+        };
+
+        const [uploadUrl] = await file.getSignedUrl(signedUrlOptions);
+
+        // Avatars are tracked on the users doc via photoURL — no files doc needed.
+        // For all other folders, create a files doc to track the upload.
+        let fileId: string | null = null;
+        if (!isAvatar) {
+          const fileRef = await db.collection('files').add({
+            userId: uid,
+            fileName,
+            contentType,
+            filePath,
+            folder,
+            metadata: sanitizeMetadata(metadata),
+            status: 'pending',
+            createdAt: FieldValue.serverTimestamp(),
+          });
+          fileId = fileRef.id;
+        }
 
         return successResponse(res, {
-          fileId: fileRef.id,
+          fileId,
           uploadUrl,
           filePath,
-          publicUrl: `https://storage.googleapis.com/${bucket.name}/${filePath}`
+          publicUrl: `https://storage.googleapis.com/${bucket.name}/${filePath}`,
         });
       }
 
@@ -87,21 +113,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             fileName: fileName || fileData.fileName,
             contentType: contentType || fileData.contentType,
             filePath: newFilePath,
-            metadata: metadata ? { ...fileData.metadata, ...metadata } : fileData.metadata,
+            metadata: metadata
+              ? { ...fileData.metadata, ...sanitizeMetadata(metadata) }
+              : fileData.metadata,
             updatedAt: FieldValue.serverTimestamp(),
-            status: 'completed'
+            status: 'completed',
           });
         } else if (metadata) {
           await fileDoc.ref.update({
-            metadata: { ...fileData.metadata, ...metadata },
-            updatedAt: FieldValue.serverTimestamp()
+            metadata: { ...fileData.metadata, ...sanitizeMetadata(metadata) },
+            updatedAt: FieldValue.serverTimestamp(),
           });
         }
 
         return successResponse(res, {
           fileId,
           filePath: newFilePath,
-          publicUrl: `https://storage.googleapis.com/${bucket.name}/${newFilePath}`
+          publicUrl: `https://storage.googleapis.com/${bucket.name}/${newFilePath}`,
         });
       }
 
@@ -135,7 +163,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         return successResponse(res, {
           message: 'File deleted successfully',
-          fileId
+          fileId,
         });
       }
 
@@ -143,7 +171,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const uid = await verifyAuth(req, res);
         if (!uid) return;
 
-        const { fileId, expiresIn = 3600 } = req.query;
+        const { fileId } = req.query;
+        // req.query values are always strings — parseInt prevents NaN from
+        // the previous `(expiresIn as number) * 1000` cast.
+        const expiresIn = parseInt(req.query.expiresIn as string, 10) || 3600;
 
         if (!fileId) {
           return errorResponse(res, 'fileId is required', 400);
@@ -166,7 +197,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         const [signedUrl] = await file.getSignedUrl({
           action: 'read',
-          expires: Date.now() + (expiresIn as number) * 1000
+          expires: Date.now() + expiresIn * 1000,
         });
 
         return successResponse(res, {
@@ -174,7 +205,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           fileId,
           fileName: fileData.fileName,
           contentType: fileData.contentType,
-          expiresAt: new Date(Date.now() + (expiresIn as number) * 1000).toISOString()
+          expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
         });
       }
 
