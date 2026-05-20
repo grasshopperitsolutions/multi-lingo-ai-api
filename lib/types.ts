@@ -12,7 +12,7 @@ export type VercelResponse = ServerResponse & {
 
 // --- AI Provider Types ---
 
-export type ProviderName = 'openai' | 'perplexity';
+export type ProviderName = 'openai' | 'perplexity' | 'gemini';
 
 export interface OpenAIParams {
   provider: 'openai';
@@ -54,7 +54,35 @@ export interface PerplexityParams {
   web_search_options?: Record<string, unknown>;
 }
 
-export type ProviderParams = OpenAIParams | PerplexityParams;
+/**
+ * Gemini (@google/genai SDK) parameter surface.
+ * Uses `config` block with generationConfig fields.
+ * responseMimeType + responseSchema enforce structured JSON output.
+ */
+export interface GeminiParams {
+  provider: 'gemini';
+  model?: string;              // default: 'gemini-2.0-flash'
+  temperature?: number;        // 0–2, default: 0.8
+  maxOutputTokens?: number;    // default: 300
+  topP?: number;               // 0–1, default: 0.9
+  topK?: number;               // integer, default: 40
+  stopSequences?: string[];    // stop sequence(s)
+  /**
+   * When true, enforces JSON output via responseMimeType: 'application/json'.
+   * Your prompt must still describe the desired JSON structure unless
+   * you also provide responseSchema.
+   */
+  jsonMode?: boolean;          // default: false
+  /**
+   * Optional JSON Schema object. When provided, Gemini enforces the exact
+   * shape of the output. Implies jsonMode = true.
+   * Shape: { type: 'object', properties: { ... }, required: [...] }
+   */
+  responseSchema?: Record<string, unknown>;
+  systemInstruction?: string;  // system-level prompt prepended before contents
+}
+
+export type ProviderParams = OpenAIParams | PerplexityParams | GeminiParams;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -73,4 +101,19 @@ export interface AskAIResponse {
   text: string;
   provider: ProviderName;
   model: string;
+}
+
+// --- Hangman Feature Types ---
+
+export interface HangmanRequest {
+  userDialect: string;       // dialect of the user's native/known language, e.g. 'pt-BR'
+  learningDialect: string;   // dialect of the target language being learned, e.g. 'es-MX'
+  interests?: string[];      // optional list of interest topics to bias word selection
+  seenWords?: string[];      // words already seen this session — model must avoid repeating these
+}
+
+export interface HangmanResponse {
+  word: string;              // the word to guess, in learningDialect
+  hint: string;              // description/clue written in userDialect
+  dialect: string;           // echoes back the learningDialect used
 }

@@ -3,6 +3,7 @@ import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
 import { askOpenAI } from '../lib/providers/openai';
 import { askPerplexity } from '../lib/providers/perplexity';
+import { askGemini } from '../lib/providers/gemini';
 import type { VercelRequest, VercelResponse, AskAIRequest } from '../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -28,10 +29,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const { prompt, messages, providerParams } = body;
 
-    const result =
-      providerParams.provider === 'perplexity'
-        ? await askPerplexity(prompt, providerParams, messages)
-        : await askOpenAI(prompt, providerParams, messages);
+    let result;
+    switch (providerParams.provider) {
+      case 'perplexity':
+        result = await askPerplexity(prompt, providerParams, messages);
+        break;
+      case 'gemini':
+        result = await askGemini(prompt, providerParams, messages);
+        break;
+      case 'openai':
+      default:
+        result = await askOpenAI(prompt, providerParams, messages);
+        break;
+    }
 
     return successResponse(res, result);
   } catch (err: any) {
