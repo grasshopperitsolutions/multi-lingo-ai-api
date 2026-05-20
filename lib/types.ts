@@ -10,7 +10,9 @@ export type VercelResponse = ServerResponse & {
   json: (body: any) => void;
 };
 
-// --- AI Provider Types ---
+// ─────────────────────────────────────────────────────────────────────────────
+// AI Provider Types
+// ─────────────────────────────────────────────────────────────────────────────
 
 export type ProviderName = 'openai' | 'perplexity' | 'gemini';
 
