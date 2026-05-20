@@ -112,11 +112,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (query) {
           const filters =
             typeof query === 'string' ? JSON.parse(query) : query;
-          const orderBy =
-            (req.query.orderBy as string) || 'createdAt';
-          const order =
-            (req.query.order as string) || 'desc';
-          const limit = parseInt(req.query.limit as string) || 20;
+          // NOTE: orderBy defaults to undefined — do NOT add a default like 'createdAt'.
+          // Forcing an orderBy on every query requires composite indexes and adds
+          // unnecessary overhead. Callers must explicitly request ordering if needed.
+          const orderBy = req.query.orderBy as string | undefined;
+          // order only matters when orderBy is provided
+          const order = (req.query.order as 'asc' | 'desc') || undefined;
+          // NOTE: limit defaults to undefined — do NOT add a default like 20 or 100.
+          // Without a limit, Firestore returns all matching documents in document ID order,
+          // which is faster (no sorting) and avoids composite index requirements.
+          const limit = req.query.limit
+            ? Math.min(parseInt(req.query.limit as string), 100)
+            : undefined;
           const startAfter = req.query.startAfter;
 
           let firestoreQuery: FirebaseFirestore.Query = resolveCollection(
@@ -129,12 +136,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             }
           }
 
-          firestoreQuery = firestoreQuery.orderBy(orderBy, order as 'asc' | 'desc');
+          // Only apply orderBy when explicitly requested — avoids unnecessary
+          // composite index requirements and improves query performance.
+          if (orderBy) {
+            firestoreQuery = firestoreQuery.orderBy(orderBy, order);
+          }
 
-          const pageSize = Math.min(limit, 100);
-          firestoreQuery = firestoreQuery.limit(pageSize);
+          // Only apply limit when explicitly requested — without it, Firestore
+          // returns all matching documents (up to Firestore's default limits).
+          if (limit !== undefined) {
+            firestoreQuery = firestoreQuery.limit(limit);
+          }
 
-          if (startAfter) {
+          // startAfter requires orderBy to be set — otherwise the cursor
+          // position is undefined and the query will error.
+          if (startAfter && orderBy) {
             firestoreQuery = firestoreQuery.startAfter(startAfter);
           }
 
@@ -155,10 +171,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           const lastVisible = snapshot.docs[snapshot.docs.length - 1];
 
+          // hasMore is only meaningful when a limit was set — without a limit,
+          // all documents are returned, so hasMore is always false.
           return successResponse(res, {
             documents,
             collection,
-            hasMore: documents.length === pageSize,
+            hasMore: limit !== undefined && documents.length === limit,
             lastDocumentId: lastVisible ? lastVisible.id : null,
           });
         }
