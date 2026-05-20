@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import type { OpenAIParams, AskAIResponse } from '../types';
+import type { OpenAIParams, AskAIResponse, ChatMessage } from '../types';
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -9,14 +9,21 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
  * to return JSON, otherwise the API will throw.
  */
 export async function askOpenAI(
-  prompt: string,
-  params: OpenAIParams
+  prompt: string | undefined,
+  params: OpenAIParams,
+  messages?: ChatMessage[]
 ): Promise<AskAIResponse> {
   const model = params.model ?? 'gpt-4o-mini';
 
+  // Use provided messages array or fall back to single-turn prompt
+  const resolvedMessages: ChatMessage[] =
+    messages && messages.length > 0
+      ? messages
+      : [{ role: 'user', content: prompt ?? '' }];
+
   const completion = await client.chat.completions.create({
     model,
-    messages: [{ role: 'user', content: prompt }],
+    messages: resolvedMessages,
     temperature: params.temperature ?? 0.7,
     max_tokens: params.max_tokens ?? 300,
     response_format: { type: 'json_object' },

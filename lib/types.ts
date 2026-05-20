@@ -21,17 +21,51 @@ export interface OpenAIParams {
   max_tokens?: number;  // default: 300
 }
 
+/** Full Sonar API parameter surface — all fields are optional (defaults applied in provider). */
 export interface PerplexityParams {
   provider: 'perplexity';
-  model?: string;       // default: 'sonar'
-  temperature?: number; // default: 0.7
-  max_tokens?: number;  // default: 300
+  // Core
+  model?: string;                    // default: 'sonar'
+  temperature?: number;              // 0–2, default: 0.2
+  max_tokens?: number;               // default: 300
+  top_p?: number;                    // 0–1, default: 0.9
+  stream?: boolean;                  // default: false
+  stop?: string | string[];          // stop sequence(s)
+
+  // Search behaviour
+  search_mode?: 'web' | 'academic' | 'sec'; // default: 'web'
+  disable_search?: boolean;          // default: false
+  enable_search_classifier?: boolean;
+  return_images?: boolean;           // default: false
+  return_related_questions?: boolean; // default: false
+  search_domain_filter?: string[];   // restrict search to domains
+  search_language_filter?: string[]; // ISO 639-1 language codes
+  search_recency_filter?: 'hour' | 'day' | 'week' | 'month' | 'year';
+  search_after_date_filter?: string;  // MM/DD/YYYY
+  search_before_date_filter?: string; // MM/DD/YYYY
+
+  // Output
+  stream_mode?: 'full' | 'concise';  // default: 'full'
+  language_preference?: string;      // ISO 639-1, e.g. 'en'
+  reasoning_effort?: 'minimal' | 'low' | 'medium' | 'high';
+  response_format?: { type: 'json_schema'; json_schema: Record<string, unknown> };
+
+  // Advanced search options object (sub-fields forwarded as-is)
+  web_search_options?: Record<string, unknown>;
 }
 
 export type ProviderParams = OpenAIParams | PerplexityParams;
 
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
 export interface AskAIRequest {
-  prompt: string;
+  /** Single-turn convenience shorthand — wrapped as a user message. */
+  prompt?: string;
+  /** Full conversation history for multi-turn exchanges. */
+  messages?: ChatMessage[];
   providerParams: ProviderParams;
 }
 
