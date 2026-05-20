@@ -18,21 +18,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const body = req.body as AskAIRequest;
 
-  if (!body?.prompt || !body?.providerParams?.provider) {
-    return errorResponse(res, 'Missing required fields: prompt, providerParams.provider', 400);
+  if (!body?.providerParams?.provider) {
+    return errorResponse(res, 'Missing required field: providerParams.provider', 400);
+  }
+  if (!body?.prompt && (!body?.messages || body.messages.length === 0)) {
+    return errorResponse(res, 'Provide either prompt or a non-empty messages array', 400);
   }
 
   try {
-    const { prompt, providerParams } = body;
+    const { prompt, messages, providerParams } = body;
 
     const result =
       providerParams.provider === 'perplexity'
-        ? await askPerplexity(prompt, providerParams)
-        : await askOpenAI(prompt, providerParams);
+        ? await askPerplexity(prompt, providerParams, messages)
+        : await askOpenAI(prompt, providerParams, messages);
 
     return successResponse(res, result);
   } catch (err: any) {
-    console.error('[ask-ai] Error:', err?.message ?? err);
-    return errorResponse(res, 'AI request failed', 500);
+    const upstreamStatus: number =
+      err?.status ?? err?.response?.status ?? err?.statusCode ?? 500;
+    const httpStatus =
+      upstreamStatus >= 400 && upstreamStatus < 600 ? upstreamStatus : 500;
+    const message = err?.message ?? 'AI request failed';
+    console.error(`[ask-ai] Error (${httpStatus}):`, message);
+    return errorResponse(res, message, httpStatus);
   }
 }
