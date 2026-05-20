@@ -102,18 +102,3 @@ export interface AskAIResponse {
   provider: ProviderName;
   model: string;
 }
-
-// --- Hangman Feature Types ---
-
-export interface HangmanRequest {
-  userDialect: string;       // dialect of the user's native/known language, e.g. 'pt-BR'
-  learningDialect: string;   // dialect of the target language being learned, e.g. 'es-MX'
-  interests?: string[];      // optional list of interest topics to bias word selection
-  seenWords?: string[];      // words already seen this session — model must avoid repeating these
-}
-
-export interface HangmanResponse {
-  word: string;              // the word to guess, in learningDialect
-  hint: string;              // description/clue written in userDialect
-  dialect: string;           // echoes back the learningDialect used
-}
