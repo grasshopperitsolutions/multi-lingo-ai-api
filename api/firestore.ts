@@ -68,6 +68,9 @@ const ALLOWED_OPS = new Set([
   'array-contains', 'in', 'not-in', 'array-contains-any',
 ]);
 
+/** Default query limit when the caller does not specify one. */
+const DEFAULT_QUERY_LIMIT = 100;
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
 
@@ -141,12 +144,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const orderBy = req.query.orderBy as string | undefined;
           // order only matters when orderBy is provided
           const order = (req.query.order as 'asc' | 'desc') || undefined;
-          // NOTE: limit defaults to undefined — do NOT add a default like 20 or 100.
-          // Without a limit, Firestore returns all matching documents in document ID order,
-          // which is faster (no sorting) and avoids composite index requirements.
+          // Use the caller-supplied limit when provided; fall back to DEFAULT_QUERY_LIMIT.
+          // No hard cap is enforced — the caller is trusted to send a reasonable value.
           const limit = req.query.limit
-            ? Math.min(parseInt(req.query.limit as string), 100)
-            : undefined;
+            ? parseInt(req.query.limit as string, 10)
+            : DEFAULT_QUERY_LIMIT;
           const startAfter = req.query.startAfter;
 
           let firestoreQuery: FirebaseFirestore.Query = resolveCollection(
@@ -176,11 +178,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             firestoreQuery = firestoreQuery.orderBy(orderBy, order);
           }
 
-          // Only apply limit when explicitly requested — without it, Firestore
-          // returns all matching documents (up to Firestore's default limits).
-          if (limit !== undefined) {
-            firestoreQuery = firestoreQuery.limit(limit);
-          }
+          // Always apply limit — either the caller-supplied value or the default.
+          firestoreQuery = firestoreQuery.limit(limit);
 
           // startAfter requires orderBy to be set — otherwise the cursor
           // position is undefined and the query will error.
@@ -205,12 +204,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           const lastVisible = snapshot.docs[snapshot.docs.length - 1];
 
-          // hasMore is only meaningful when a limit was set — without a limit,
-          // all documents are returned, so hasMore is always false.
           return successResponse(res, {
             documents,
             collection,
-            hasMore: limit !== undefined && documents.length === limit,
+            hasMore: documents.length === limit,
             lastDocumentId: lastVisible ? lastVisible.id : null,
           });
         }
@@ -339,7 +336,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const doc = await docRef.get();
 
         if (!doc.exists) {
-          return errorResponse(res, 'File not found', 404);
+          return errorResponse(res, 'Document not found', 404);
         }
 
         const docData = doc.data();
