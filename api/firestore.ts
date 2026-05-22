@@ -59,6 +59,18 @@ function resolveDocument(
   return resolveCollection(collectionPath).doc(docId);
 }
 
+/**
+ * Supported Firestore WhereFilterOp values.
+ * These map directly to the Firebase Admin SDK's accepted operators.
+ */
+const ALLOWED_OPS = new Set([
+  '==', '!=', '<', '<=', '>', '>=',
+  'array-contains', 'in', 'not-in', 'array-contains-any',
+]);
+
+/** Default query limit when the caller does not specify one. */
+const DEFAULT_QUERY_LIMIT = 100;
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
 
@@ -102,38 +114,62 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // GET — fetch a single document OR run a filtered query
       // ─────────────────────────────────────────────────────────────────────
       case 'GET': {
-        const { collection, id, query } = req.query;
+        const { collection, id } = req.query;
 
         if (!collection) {
           return errorResponse(res, 'collection is required', 400);
         }
 
         // ── Filtered query ──
-        if (query) {
-          const filters =
-            typeof query === 'string' ? JSON.parse(query) : query;
+        // Triggered when a "filters" param is present (JSON array of {field, op, value}).
+        // The frontend declares intent; this handler owns all Firestore query construction.
+        if (req.query.filters) {
+          let filters: Array<{ field: string; op: string; value: unknown }>;
+
+          try {
+            filters = typeof req.query.filters === 'string'
+              ? JSON.parse(req.query.filters)
+              : req.query.filters;
+          } catch {
+            return errorResponse(res, 'filters must be a valid JSON array', 400);
+          }
+
+          if (!Array.isArray(filters)) {
+            return errorResponse(res, 'filters must be an array of { field, op, value } objects', 400);
+          }
+
           // NOTE: orderBy defaults to undefined — do NOT add a default like 'createdAt'.
           // Forcing an orderBy on every query requires composite indexes and adds
           // unnecessary overhead. Callers must explicitly request ordering if needed.
           const orderBy = req.query.orderBy as string | undefined;
           // order only matters when orderBy is provided
           const order = (req.query.order as 'asc' | 'desc') || undefined;
-          // NOTE: limit defaults to undefined — do NOT add a default like 20 or 100.
-          // Without a limit, Firestore returns all matching documents in document ID order,
-          // which is faster (no sorting) and avoids composite index requirements.
+          // Use the caller-supplied limit when provided; fall back to DEFAULT_QUERY_LIMIT.
+          // No hard cap is enforced — the caller is trusted to send a reasonable value.
           const limit = req.query.limit
-            ? Math.min(parseInt(req.query.limit as string), 100)
-            : undefined;
+            ? parseInt(req.query.limit as string, 10)
+            : DEFAULT_QUERY_LIMIT;
           const startAfter = req.query.startAfter;
 
           let firestoreQuery: FirebaseFirestore.Query = resolveCollection(
             collection as string
           );
 
-          if (typeof filters === 'object' && filters !== null) {
-            for (const [field, value] of Object.entries(filters)) {
-              firestoreQuery = firestoreQuery.where(field, '==', value);
+          for (const filter of filters) {
+            const { field, op, value } = filter;
+
+            if (!field || !op) {
+              return errorResponse(res, 'Each filter must have field and op', 400);
             }
+            if (!ALLOWED_OPS.has(op)) {
+              return errorResponse(res, `Unsupported filter operator: "${op}". Allowed: ${[...ALLOWED_OPS].join(', ')}`, 400);
+            }
+
+            firestoreQuery = firestoreQuery.where(
+              field,
+              op as FirebaseFirestore.WhereFilterOp,
+              value
+            );
           }
 
           // Only apply orderBy when explicitly requested — avoids unnecessary
@@ -142,11 +178,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             firestoreQuery = firestoreQuery.orderBy(orderBy, order);
           }
 
-          // Only apply limit when explicitly requested — without it, Firestore
-          // returns all matching documents (up to Firestore's default limits).
-          if (limit !== undefined) {
-            firestoreQuery = firestoreQuery.limit(limit);
-          }
+          // Always apply limit — either the caller-supplied value or the default.
+          firestoreQuery = firestoreQuery.limit(limit);
 
           // startAfter requires orderBy to be set — otherwise the cursor
           // position is undefined and the query will error.
@@ -171,12 +204,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           const lastVisible = snapshot.docs[snapshot.docs.length - 1];
 
-          // hasMore is only meaningful when a limit was set — without a limit,
-          // all documents are returned, so hasMore is always false.
           return successResponse(res, {
             documents,
             collection,
-            hasMore: limit !== undefined && documents.length === limit,
+            hasMore: documents.length === limit,
             lastDocumentId: lastVisible ? lastVisible.id : null,
           });
         }
