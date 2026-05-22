@@ -59,6 +59,15 @@ function resolveDocument(
   return resolveCollection(collectionPath).doc(docId);
 }
 
+/**
+ * Supported Firestore WhereFilterOp values.
+ * These map directly to the Firebase Admin SDK's accepted operators.
+ */
+const ALLOWED_OPS = new Set([
+  '==', '!=', '<', '<=', '>', '>=',
+  'array-contains', 'in', 'not-in', 'array-contains-any',
+]);
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
 
@@ -102,16 +111,30 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // GET — fetch a single document OR run a filtered query
       // ─────────────────────────────────────────────────────────────────────
       case 'GET': {
-        const { collection, id, query } = req.query;
+        const { collection, id } = req.query;
 
         if (!collection) {
           return errorResponse(res, 'collection is required', 400);
         }
 
         // ── Filtered query ──
-        if (query) {
-          const filters =
-            typeof query === 'string' ? JSON.parse(query) : query;
+        // Triggered when a "filters" param is present (JSON array of {field, op, value}).
+        // The frontend declares intent; this handler owns all Firestore query construction.
+        if (req.query.filters) {
+          let filters: Array<{ field: string; op: string; value: unknown }>;
+
+          try {
+            filters = typeof req.query.filters === 'string'
+              ? JSON.parse(req.query.filters)
+              : req.query.filters;
+          } catch {
+            return errorResponse(res, 'filters must be a valid JSON array', 400);
+          }
+
+          if (!Array.isArray(filters)) {
+            return errorResponse(res, 'filters must be an array of { field, op, value } objects', 400);
+          }
+
           // NOTE: orderBy defaults to undefined — do NOT add a default like 'createdAt'.
           // Forcing an orderBy on every query requires composite indexes and adds
           // unnecessary overhead. Callers must explicitly request ordering if needed.
@@ -130,10 +153,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             collection as string
           );
 
-          if (typeof filters === 'object' && filters !== null) {
-            for (const [field, value] of Object.entries(filters)) {
-              firestoreQuery = firestoreQuery.where(field, '==', value);
+          for (const filter of filters) {
+            const { field, op, value } = filter;
+
+            if (!field || !op) {
+              return errorResponse(res, 'Each filter must have field and op', 400);
             }
+            if (!ALLOWED_OPS.has(op)) {
+              return errorResponse(res, `Unsupported filter operator: "${op}". Allowed: ${[...ALLOWED_OPS].join(', ')}`, 400);
+            }
+
+            firestoreQuery = firestoreQuery.where(
+              field,
+              op as FirebaseFirestore.WhereFilterOp,
+              value
+            );
           }
 
           // Only apply orderBy when explicitly requested — avoids unnecessary
@@ -305,7 +339,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const doc = await docRef.get();
 
         if (!doc.exists) {
-          return errorResponse(res, 'Document not found', 404);
+          return errorResponse(res, 'File not found', 404);
         }
 
         const docData = doc.data();
