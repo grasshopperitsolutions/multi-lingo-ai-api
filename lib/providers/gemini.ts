@@ -21,13 +21,16 @@ const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
  * Conversation history: 'system' role messages from ChatMessage[] are
  * forwarded as systemInstruction. 'user'/'assistant' ('model') turns are
  * mapped to the Gemini `contents` array.
+ *
+ * Default model: gemini-2.5-flash (stable, free tier available).
+ * gemini-2.0-flash is deprecated and shuts down 2026-06-01.
  */
 export async function askGemini(
   prompt: string | undefined,
   params: GeminiParams,
   messages?: ChatMessage[]
 ): Promise<AskAIResponse> {
-  const model = params.model ?? 'gemini-2.0-flash';
+  const model = params.model ?? 'gemini-2.5-flash';
 
   // Separate system messages from conversation turns
   const systemMessages = messages?.filter((m) => m.role === 'system') ?? [];
@@ -56,22 +59,51 @@ export async function askGemini(
   // Determine if JSON mode should be enabled
   const useJson = params.jsonMode === true || !!params.responseSchema;
 
-  const response = await client.models.generateContent({
-    model,
-    contents,
-    ...(systemInstruction ? { config: { systemInstruction } } : {}),
-    config: {
-      temperature: params.temperature ?? 0.8,
-      maxOutputTokens: params.maxOutputTokens ?? 300,
-      topP: params.topP ?? 0.9,
-      ...(params.topK !== undefined ? { topK: params.topK } : {}),
-      ...(params.stopSequences ? { stopSequences: params.stopSequences } : {}),
-      ...(useJson ? { responseMimeType: 'application/json' } : {}),
-      ...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
-      ...(systemInstruction ? { systemInstruction } : {}),
-    },
-  });
+  try {
+    const response = await client.models.generateContent({
+      model,
+      contents,
+      ...(systemInstruction ? { config: { systemInstruction } } : {}),
+      config: {
+        temperature: params.temperature ?? 0.8,
+        maxOutputTokens: params.maxOutputTokens ?? 300,
+        topP: params.topP ?? 0.9,
+        ...(params.topK !== undefined ? { topK: params.topK } : {}),
+        ...(params.stopSequences ? { stopSequences: params.stopSequences } : {}),
+        ...(useJson ? { responseMimeType: 'application/json' } : {}),
+        ...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
+        ...(systemInstruction ? { systemInstruction } : {}),
+      },
+    });
 
-  const text = response.text ?? '';
-  return { text, provider: 'gemini', model };
+    const text = response.text ?? '';
+    return { text, provider: 'gemini', model };
+  } catch (err: any) {
+    const code: number = err?.status ?? err?.code ?? err?.response?.status ?? 500;
+    const rawMessage: string = err?.message ?? '';
+
+    if (code === 404 || rawMessage.includes('no longer available') || rawMessage.includes('NOT_FOUND')) {
+      throw Object.assign(
+        new Error(`Gemini model "${model}" is unavailable or deprecated. Please select a different model.`),
+        { status: 422 }
+      );
+    }
+    if (code === 429) {
+      throw Object.assign(
+        new Error('Gemini rate limit reached. Please try again shortly.'),
+        { status: 429 }
+      );
+    }
+    if (code === 401 || code === 403) {
+      throw Object.assign(
+        new Error('Gemini API key is invalid or lacks the required permissions.'),
+        { status: 401 }
+      );
+    }
+
+    throw Object.assign(
+      new Error('Gemini request failed. Please try again.'),
+      { status: 500 }
+    );
+  }
 }
