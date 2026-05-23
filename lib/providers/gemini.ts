@@ -63,10 +63,9 @@ export async function askGemini(
     const response = await client.models.generateContent({
       model,
       contents,
-      ...(systemInstruction ? { config: { systemInstruction } } : {}),
       config: {
         temperature: params.temperature ?? 0.8,
-        maxOutputTokens: params.maxOutputTokens ?? 300,
+        maxOutputTokens: params.maxOutputTokens ?? 1024,
         topP: params.topP ?? 0.9,
         ...(params.topK !== undefined ? { topK: params.topK } : {}),
         ...(params.stopSequences ? { stopSequences: params.stopSequences } : {}),
@@ -76,7 +75,16 @@ export async function askGemini(
       },
     });
 
-    const text = response.text ?? '';
+    // Safely extract text via candidates to avoid silent empty string from the .text getter
+    // (can return '' when finishReason is not STOP, e.g. MAX_TOKENS or safety blocks)
+    const candidate = response.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+    const text = candidate?.content?.parts?.[0]?.text ?? '';
+
+    if (!text) {
+      console.warn(`[askGemini] Empty response text. model=${model} finishReason=${finishReason}`);
+    }
+
     return { text, provider: 'gemini', model };
   } catch (err: any) {
     const code: number = err?.status ?? err?.code ?? err?.response?.status ?? 500;
