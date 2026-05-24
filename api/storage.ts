@@ -137,8 +137,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const uid = await verifyAuth(req, res);
         if (!uid) return;
 
-        const { fileId } = req.body;
+        const { fileId, filePath } = req.body;
 
+        // --- Avatar deletion path (no fileId, use filePath directly) ---
+        // Avatars are not tracked in the files collection, so they must be
+        // deleted by their GCS path. We enforce that the path belongs to
+        // the authenticated user to prevent deleting other users' files.
+        if (filePath && !fileId) {
+          const allowedPrefix = `avatars/${uid}/`;
+          if (!filePath.startsWith(allowedPrefix)) {
+            return errorResponse(res, 'Unauthorized to delete this file', 403);
+          }
+          const bucket = storage.bucket();
+          const file = bucket.file(filePath as string);
+          try {
+            await file.delete();
+          } catch (e: any) {
+            // File may already be gone — treat as success
+            if (e.code !== 404 && e.code !== 'NOT_FOUND') throw e;
+          }
+          return successResponse(res, { message: 'File deleted successfully', filePath });
+        }
+
+        // --- Standard fileId-based deletion path ---
         if (!fileId) {
           return errorResponse(res, 'fileId is required', 400);
         }
