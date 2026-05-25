@@ -137,31 +137,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const uid = await verifyAuth(req, res);
         if (!uid) return;
 
-        const { fileId, filePath } = req.body;
+        const { fileId, prefix } = req.body;
 
-        // --- Avatar deletion path (no fileId, use filePath directly) ---
-        // Avatars are not tracked in the files collection, so they must be
-        // deleted by their GCS path. We enforce that the path belongs to
-        // the authenticated user to prevent deleting other users' files.
-        if (filePath && !fileId) {
-          const allowedPrefix = `avatars/${uid}/`;
-          if (!filePath.startsWith(allowedPrefix)) {
-            return errorResponse(res, 'Unauthorized to delete this file', 403);
+        // --- Prefix-based bulk delete (no fileId) ---
+        // Deletes ALL objects whose GCS path starts with the given prefix.
+        // The caller is responsible for deciding what prefix to wipe — the API
+        // has no knowledge of folder conventions or business logic.
+        //
+        // Security: the prefix must contain the authenticated user's uid to
+        // prevent one user from wiping another user's files.
+        if (prefix && !fileId) {
+          if (!prefix.includes(uid)) {
+            return errorResponse(res, 'Unauthorized to delete this prefix', 403);
           }
           const bucket = storage.bucket();
-          const file = bucket.file(filePath as string);
           try {
-            await file.delete();
+            await bucket.deleteFiles({ prefix, force: true });
           } catch (e: any) {
-            // File may already be gone — treat as success
+            // Empty prefix / no files is fine — treat as success
             if (e.code !== 404 && e.code !== 'NOT_FOUND') throw e;
           }
-          return successResponse(res, { message: 'File deleted successfully', filePath });
+          return successResponse(res, { message: 'Files deleted successfully', prefix });
         }
 
         // --- Standard fileId-based deletion path ---
         if (!fileId) {
-          return errorResponse(res, 'fileId is required', 400);
+          return errorResponse(res, 'fileId or prefix is required', 400);
         }
 
         const fileDoc = await db.collection('files').doc(fileId as string).get();
