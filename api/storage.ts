@@ -137,26 +137,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const uid = await verifyAuth(req, res);
         if (!uid) return;
 
-        const { fileId, filePath } = req.body;
+        const { fileId, folder } = req.body;
 
-        // --- Avatar deletion path (no fileId, use filePath directly) ---
-        // Avatars are not tracked in the files collection, so they must be
-        // deleted by their GCS path. We enforce that the path belongs to
-        // the authenticated user to prevent deleting other users' files.
-        if (filePath && !fileId) {
-          const allowedPrefix = `avatars/${uid}/`;
-          if (!filePath.startsWith(allowedPrefix)) {
-            return errorResponse(res, 'Unauthorized to delete this file', 403);
-          }
+        // --- Avatar folder wipe (no fileId, folder === 'avatars') ---
+        // Deletes ALL objects under avatars/{uid}/ before a new avatar is
+        // uploaded. This is more robust than single-file deletion because it:
+        //   1. Avoids URL-encoding mismatches between the stored publicUrl
+        //      and the actual GCS object path.
+        //   2. Cleans up any previously orphaned files in the folder.
+        // Security: only the authenticated user's own prefix is ever wiped.
+        if (folder === 'avatars' && !fileId) {
           const bucket = storage.bucket();
-          const file = bucket.file(filePath as string);
+          const prefix = `avatars/${uid}/`;
           try {
-            await file.delete();
+            await bucket.deleteFiles({ prefix, force: true });
           } catch (e: any) {
-            // File may already be gone — treat as success
+            // No files found is fine — treat as success
             if (e.code !== 404 && e.code !== 'NOT_FOUND') throw e;
           }
-          return successResponse(res, { message: 'File deleted successfully', filePath });
+          return successResponse(res, { message: 'Avatar folder cleared', prefix });
         }
 
         // --- Standard fileId-based deletion path ---
