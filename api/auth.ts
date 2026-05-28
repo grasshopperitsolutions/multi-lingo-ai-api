@@ -2,6 +2,7 @@ import { auth, db, storage, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
+import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
 import type { VercelRequest, VercelResponse } from '../lib/types';
 
 /**
@@ -29,17 +30,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   /**
    * DELETE /api/auth
-   * Permanently deletes the authenticated user's entire account:
-   *   1. Firestore users/{uid} document + all sub-collections
-   *   2. Firestore files collection documents owned by uid
-   *   3. Cloud Storage files under avatars/{uid}/ and uploads/{uid}/
-   *   4. Firebase Auth account (point of no return)
-   *
-   * Requires: Authorization: Bearer <idToken>
+   * Permanently deletes the authenticated user's entire account.
    */
   if (req.method === 'DELETE') {
+    const elapsed = startTimer();
     const uid = await verifyAuth(req, res);
     if (!uid) return;
+
+    logInfo('account_delete_start', 'auth', { uid, method: req.method });
 
     try {
       // 1. Delete Firestore user document + sub-collections
@@ -60,6 +58,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         filesSnap.docs.forEach((doc) => batch.delete(doc.ref));
         if (!filesSnap.empty) await batch.commit();
       } catch (firestoreErr: any) {
+        logWarn('account_delete_firestore_cleanup_failed', 'auth', {
+          uid,
+          reason: firestoreErr?.message,
+        });
         console.warn(`Firestore files cleanup warning uid=${uid}:`, firestoreErr?.message);
       }
 
@@ -69,19 +71,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         await bucket.deleteFiles({ prefix: `avatars/${uid}/` });
         await bucket.deleteFiles({ prefix: `uploads/${uid}/` });
       } catch (storageErr: any) {
+        logWarn('account_delete_storage_cleanup_failed', 'auth', {
+          uid,
+          reason: storageErr?.message,
+        });
         console.warn(`Storage cleanup warning uid=${uid}:`, storageErr?.message);
       }
 
       // 4. Delete Firebase Auth account — point of no return
       await auth.deleteUser(uid);
 
-      console.log(`Account deleted: uid=${uid} at ${new Date().toISOString()}`);
+      logInfo('account_deleted', 'auth', {
+        uid,
+        method: req.method,
+        statusCode: 200,
+        durationMs: elapsed(),
+      });
 
       return successResponse(res, {
         message: 'Account deleted successfully',
         uid,
       });
     } catch (error: any) {
+      logError('account_delete_failed', 'auth', {
+        uid,
+        method: req.method,
+        statusCode: 500,
+        durationMs: elapsed(),
+        errorMessage: error?.message,
+      });
       return errorResponse(res, error.message || 'Account deletion failed', 500);
     }
   }
@@ -89,11 +107,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   /**
    * POST /api/auth
    * Handles social login actions: google, apple, facebook, twitter.
-   * Also handles logout (client-side only, kept here for future server-side cleanup).
    */
   if (req.method !== 'POST') {
     return errorResponse(res, 'Method not allowed', 405);
   }
+
+  const elapsed = startTimer();
 
   try {
     const { action } = req.body;
@@ -104,6 +123,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     switch (action) {
       case 'logout': {
+        logInfo('user_logout', 'auth', { method: req.method, statusCode: 200 });
         return successResponse(res, { message: 'Logged out successfully' });
       }
 
@@ -120,9 +140,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const decodedToken = await auth.verifyIdToken(idToken);
 
         let userRecord;
+        let isNewUser = false;
         try {
           userRecord = await auth.getUser(decodedToken.uid);
         } catch {
+          isNewUser = true;
           userRecord = await auth.createUser({
             uid: decodedToken.uid,
             email: decodedToken.email,
@@ -158,6 +180,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         const customToken = await auth.createCustomToken(userRecord.uid);
 
+        logInfo('user_login', 'auth', {
+          uid: userRecord.uid,
+          method: req.method,
+          provider: action,
+          isNewUser,
+          statusCode: 200,
+          durationMs: elapsed(),
+        });
+
         return successResponse(res, {
           uid: userRecord.uid,
           email: userRecord.email,
@@ -172,6 +203,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
   } catch (error: any) {
+    logError('auth_failed', 'auth', {
+      method: req.method,
+      statusCode: 401,
+      durationMs: elapsed(),
+      errorMessage: error?.message,
+    });
     return errorResponse(res, error.message || 'Authentication failed', 401);
   }
 }

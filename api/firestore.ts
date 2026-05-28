@@ -3,18 +3,10 @@ import { db, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
+import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
 
 /**
  * Resolves a slash-separated collection path to a Firestore CollectionReference.
- *
- * Supports both top-level and nested (subcollection) paths:
- *   - "users"                          → db.collection('users')
- *   - "gameWords/hangman__es-MX__food/words" → db.collection('gameWords').doc('hangman__es-MX__food').collection('words')
- *
- * Rules:
- *   - Path segments alternate: collection / document / collection / ...
- *   - A valid collection path always has an ODD number of segments (1, 3, 5, ...).
- *   - An even number of segments means the path ends on a document, which is invalid here.
  */
 function resolveCollection(path: string): FirebaseFirestore.CollectionReference {
   const segments = path.split('/').map(s => s.trim()).filter(Boolean);
@@ -28,12 +20,10 @@ function resolveCollection(path: string): FirebaseFirestore.CollectionReference 
     );
   }
 
-  // Single top-level collection
   if (segments.length === 1) {
     return db.collection(segments[0]);
   }
 
-  // Subcollection: walk collection → doc → collection → ...
   let ref: FirebaseFirestore.DocumentReference = db
     .collection(segments[0])
     .doc(segments[1]);
@@ -47,10 +37,6 @@ function resolveCollection(path: string): FirebaseFirestore.CollectionReference 
 
 /**
  * Resolves a slash-separated document path to a Firestore DocumentReference.
- *
- * Supports both top-level and nested document paths:
- *   - "users" + "uid123"                              → db.collection('users').doc('uid123')
- *   - "gameWords/hangman__es-MX__food/words" + "wId"  → ...collection('words').doc('wId')
  */
 function resolveDocument(
   collectionPath: string,
@@ -61,7 +47,6 @@ function resolveDocument(
 
 /**
  * Supported Firestore WhereFilterOp values.
- * These map directly to the Firebase Admin SDK's accepted operators.
  */
 const ALLOWED_OPS = new Set([
   '==', '!=', '<', '<=', '>', '>=',
@@ -76,10 +61,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (handleCors(req, res)) return;
 
+  const elapsed = startTimer();
+
   try {
     switch (req.method) {
       // ─────────────────────────────────────────────────────────────────────
-      // POST — create a document (optionally with a specific id)
+      // POST — create a document
       // ─────────────────────────────────────────────────────────────────────
       case 'POST': {
         const uid = await verifyAuth(req, res);
@@ -107,6 +94,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           docRef = await resolveCollection(collection).add(documentData);
         }
 
+        logInfo('firestore_write', 'firestore', {
+          uid,
+          method: req.method,
+          collection,
+          docId: docRef.id,
+          statusCode: 201,
+          durationMs: elapsed(),
+        });
+
         return successResponse(res, { id: docRef.id, collection }, 201);
       }
 
@@ -120,9 +116,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'collection is required', 400);
         }
 
-        // ── Filtered query ──
-        // Triggered when a "filters" param is present (JSON array of {field, op, value}).
-        // The frontend declares intent; this handler owns all Firestore query construction.
         if (req.query.filters) {
           let filters: Array<{ field: string; op: string; value: unknown }>;
 
@@ -138,14 +131,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             return errorResponse(res, 'filters must be an array of { field, op, value } objects', 400);
           }
 
-          // NOTE: orderBy defaults to undefined — do NOT add a default like 'createdAt'.
-          // Forcing an orderBy on every query requires composite indexes and adds
-          // unnecessary overhead. Callers must explicitly request ordering if needed.
           const orderBy = req.query.orderBy as string | undefined;
-          // order only matters when orderBy is provided
           const order = (req.query.order as 'asc' | 'desc') || undefined;
-          // Use the caller-supplied limit when provided; fall back to DEFAULT_QUERY_LIMIT.
-          // No hard cap is enforced — the caller is trusted to send a reasonable value.
           const limit = req.query.limit
             ? parseInt(req.query.limit as string, 10)
             : DEFAULT_QUERY_LIMIT;
@@ -172,17 +159,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             );
           }
 
-          // Only apply orderBy when explicitly requested — avoids unnecessary
-          // composite index requirements and improves query performance.
           if (orderBy) {
             firestoreQuery = firestoreQuery.orderBy(orderBy, order);
           }
 
-          // Always apply limit — either the caller-supplied value or the default.
           firestoreQuery = firestoreQuery.limit(limit);
 
-          // startAfter requires orderBy to be set — otherwise the cursor
-          // position is undefined and the query will error.
           if (startAfter && orderBy) {
             firestoreQuery = firestoreQuery.startAfter(startAfter);
           }
@@ -190,6 +172,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const snapshot = await firestoreQuery.get();
 
           if (snapshot.empty) {
+            logInfo('firestore_query', 'firestore', {
+              method: req.method,
+              collection,
+              filterCount: filters.length,
+              resultCount: 0,
+              statusCode: 200,
+              durationMs: elapsed(),
+            });
             return successResponse(res, {
               documents: [],
               collection,
@@ -203,6 +193,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           }));
 
           const lastVisible = snapshot.docs[snapshot.docs.length - 1];
+
+          logInfo('firestore_query', 'firestore', {
+            method: req.method,
+            collection,
+            filterCount: filters.length,
+            resultCount: documents.length,
+            hasMore: documents.length === limit,
+            statusCode: 200,
+            durationMs: elapsed(),
+          });
 
           return successResponse(res, {
             documents,
@@ -228,8 +228,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const doc = await docRef.get();
 
         if (!doc.exists) {
+          logWarn('firestore_doc_not_found', 'firestore', {
+            method: req.method,
+            collection,
+            docId: id,
+            statusCode: 404,
+            durationMs: elapsed(),
+          });
           return errorResponse(res, 'Document not found', 404);
         }
+
+        logInfo('firestore_read', 'firestore', {
+          method: req.method,
+          collection,
+          docId: id,
+          statusCode: 200,
+          durationMs: elapsed(),
+        });
 
         return successResponse(res, {
           id: doc.id,
@@ -239,7 +254,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       // ─────────────────────────────────────────────────────────────────────
-      // PUT — partial update of an existing document
+      // PUT — partial update
       // ─────────────────────────────────────────────────────────────────────
       case 'PUT': {
         const uid = await verifyAuth(req, res);
@@ -251,24 +266,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'collection, id and data are required', 400);
         }
 
-        // ⚠️ DO NOT REMOVE — kept for reference in case RBAC is introduced in the future.
-        // if (collection === 'users' && id !== uid) {
-        //   return errorResponse(res, 'Unauthorized: you can only update your own profile', 403);
-        // }
-
         const docRef = resolveDocument(collection, id);
         const doc = await docRef.get();
 
         if (!doc.exists) {
+          logWarn('firestore_doc_not_found', 'firestore', {
+            uid,
+            method: req.method,
+            collection,
+            docId: id,
+            statusCode: 404,
+            durationMs: elapsed(),
+          });
           return errorResponse(res, 'Document not found', 404);
         }
 
-        // Skip ownership check for subcollections (e.g. game word pools are shared).
-        // Only enforce it for top-level collections where createdBy is meaningful.
         const isTopLevel = !collection.includes('/');
         if (isTopLevel && collection !== 'users') {
           const docData = doc.data();
           if (docData?.createdBy && docData.createdBy !== uid) {
+            logWarn('firestore_auth_denied', 'firestore', {
+              uid,
+              method: req.method,
+              collection,
+              docId: id,
+              statusCode: 403,
+              durationMs: elapsed(),
+            });
             return errorResponse(res, 'Unauthorized to update this document', 403);
           }
         }
@@ -281,13 +305,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         await docRef.update(updateData);
 
+        logInfo('firestore_update', 'firestore', {
+          uid,
+          method: req.method,
+          collection,
+          docId: id,
+          statusCode: 200,
+          durationMs: elapsed(),
+        });
+
         return successResponse(res, { id, collection, updated: true });
       }
 
       // ─────────────────────────────────────────────────────────────────────
-      // PATCH — deep merge update (e.g. updating a single key inside a map field)
-      // Uses dot-notation keys for nested field updates without overwriting siblings.
-      // Body: { collection, id, data: { 'hints.en-US': 'A red fruit...' } }
+      // PATCH — deep merge update
       // ─────────────────────────────────────────────────────────────────────
       case 'PATCH': {
         const uid = await verifyAuth(req, res);
@@ -303,11 +334,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const doc = await docRef.get();
 
         if (!doc.exists) {
+          logWarn('firestore_doc_not_found', 'firestore', {
+            uid,
+            method: req.method,
+            collection,
+            docId: id,
+            statusCode: 404,
+            durationMs: elapsed(),
+          });
           return errorResponse(res, 'Document not found', 404);
         }
 
-        // PATCH always uses update() (not set/merge) so dot-notation keys
-        // update individual map entries without touching sibling keys.
         const patchData = {
           ...data,
           updatedBy: uid,
@@ -315,6 +352,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         };
 
         await docRef.update(patchData);
+
+        logInfo('firestore_patch', 'firestore', {
+          uid,
+          method: req.method,
+          collection,
+          docId: id,
+          statusCode: 200,
+          durationMs: elapsed(),
+        });
 
         return successResponse(res, { id, collection, patched: true });
       }
@@ -336,15 +382,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const doc = await docRef.get();
 
         if (!doc.exists) {
+          logWarn('firestore_doc_not_found', 'firestore', {
+            uid,
+            method: req.method,
+            collection,
+            docId: id,
+            statusCode: 404,
+            durationMs: elapsed(),
+          });
           return errorResponse(res, 'Document not found', 404);
         }
 
         const docData = doc.data();
         if (docData?.createdBy && docData.createdBy !== uid) {
+          logWarn('firestore_auth_denied', 'firestore', {
+            uid,
+            method: req.method,
+            collection,
+            docId: id,
+            statusCode: 403,
+            durationMs: elapsed(),
+          });
           return errorResponse(res, 'Unauthorized to delete this document', 403);
         }
 
         await docRef.delete();
+
+        logInfo('firestore_delete', 'firestore', {
+          uid,
+          method: req.method,
+          collection,
+          docId: id,
+          statusCode: 200,
+          durationMs: elapsed(),
+        });
 
         return successResponse(res, { id, collection, deleted: true });
       }
@@ -353,6 +424,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return errorResponse(res, 'Method not allowed', 405);
     }
   } catch (error: any) {
+    logError('firestore_unhandled_error', 'firestore', {
+      method: req.method,
+      statusCode: 500,
+      durationMs: elapsed(),
+      errorMessage: error?.message,
+    });
     return errorResponse(
       res,
       error.message || 'Failed to process Firestore request',
