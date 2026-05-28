@@ -4,11 +4,14 @@ import { verifyAuth } from '../lib/verify-auth';
 import { askOpenAI } from '../lib/providers/openai';
 import { askPerplexity } from '../lib/providers/perplexity';
 import { askGemini } from '../lib/providers/gemini';
+import { log, logInfo, logError, startTimer } from '../lib/logger';
 import type { VercelRequest, VercelResponse, AskAIRequest } from '../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
   if (handleCors(req, res)) return;
+
+  const elapsed = startTimer();
 
   if (req.method !== 'POST') {
     return errorResponse(res, 'Method not allowed', 405);
@@ -26,11 +29,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return errorResponse(res, 'Provide either prompt or a non-empty messages array', 400);
   }
 
-  try {
-    const { prompt, messages, providerParams } = body;
+  const { prompt, messages, providerParams } = body;
+  const provider = providerParams.provider;
+  const model = providerParams.model ?? 'default';
+  const promptLength = prompt?.length ?? 0;
+  const messageCount = messages?.length ?? 0;
 
+  logInfo('ai_request_start', 'ask-ai', {
+    uid,
+    method: req.method,
+    provider,
+    model,
+    promptLength,
+    messageCount,
+  });
+
+  try {
     let result;
-    switch (providerParams.provider) {
+    switch (provider) {
       case 'perplexity':
         result = await askPerplexity(prompt, providerParams, messages);
         break;
@@ -43,6 +59,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         break;
     }
 
+    logInfo('ai_request_complete', 'ask-ai', {
+      uid,
+      method: req.method,
+      provider,
+      model: result.model ?? model,
+      statusCode: 200,
+      durationMs: elapsed(),
+      promptLength,
+      messageCount,
+    });
+
     return successResponse(res, result);
   } catch (err: any) {
     const upstreamStatus: number =
@@ -50,7 +77,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const httpStatus =
       upstreamStatus >= 400 && upstreamStatus < 600 ? upstreamStatus : 500;
     const message = err?.message ?? 'AI request failed';
-    console.error(`[ask-ai] Error (${httpStatus}):`, message);
+
+    logError('ai_request_error', 'ask-ai', {
+      uid,
+      method: req.method,
+      provider,
+      model,
+      statusCode: httpStatus,
+      durationMs: elapsed(),
+      errorMessage: message,
+      upstreamStatus,
+    });
+
     return errorResponse(res, message, httpStatus);
   }
 }
