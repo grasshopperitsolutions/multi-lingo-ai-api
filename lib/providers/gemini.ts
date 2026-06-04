@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import type { GeminiParams, AskAIResponse, ChatMessage } from '../types';
 
 const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
@@ -63,8 +63,16 @@ export async function askGemini(
   const useJson = params.jsonMode === true || !!params.responseSchema;
 
   // ── Thinking config (Gemini 3.x) ──────────────────────────────────────────
-  // Default to 'minimal' to keep token usage low unless caller specifies otherwise.
-  const thinkingLevel = params.thinkingLevel ?? 'minimal';
+  // Map our lowecase GeminiThinkingLevel strings to the SDK's uppercase
+  // ThinkingLevel enum values (e.g. 'minimal' → ThinkingLevel.MINIMAL).
+  const THINKING_LEVEL_MAP: Record<string, ThinkingLevel> = {
+    minimal: ThinkingLevel.MINIMAL,
+    low: ThinkingLevel.LOW,
+    medium: ThinkingLevel.MEDIUM,
+    high: ThinkingLevel.HIGH,
+  };
+  const thinkingLevelKey = params.thinkingLevel ?? 'minimal';
+  const thinkingLevel = THINKING_LEVEL_MAP[thinkingLevelKey] ?? ThinkingLevel.MINIMAL;
   const includeThoughts = params.includeThoughts ?? false;
   const thinkingConfig = { thinkingLevel, includeThoughts };
 
