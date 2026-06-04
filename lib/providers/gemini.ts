@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import type { GeminiParams, AskAIResponse, ChatMessage } from '../types';
 
 const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
@@ -11,26 +11,29 @@ const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
  *  - `temperature`: 0–2 float. Controls randomness.
  *  - `maxOutputTokens`: integer. Max tokens in the response.
  *  - `topP`: 0–1 float. Nucleus sampling threshold.
- *  - `topK`: positive integer. Top-k sampling.
+ *  - `topK`: positive integer. Top-k sampling (SDK default if omitted).
  *  - `stopSequences`: string[]. Stop generation at these strings.
  *  - `responseMimeType`: 'application/json' enforces JSON output.
  *  - `responseSchema`: JSON Schema object — guarantees exact output shape
  *    when combined with responseMimeType: 'application/json'.
  *  - `systemInstruction`: string. Prepended as a system turn before contents.
+ *  - `thinkingConfig.thinkingLevel`: Gemini 3.x only. Controls thinking tokens.
+ *    Values: 'minimal' | 'low' | 'medium' | 'high'. Default: 'minimal'.
+ *  - `thinkingConfig.includeThoughts`: Whether to return summarised thinking
+ *    in the response. Keep false in production. Default: false.
  *
  * Conversation history: 'system' role messages from ChatMessage[] are
  * forwarded as systemInstruction. 'user'/'assistant' ('model') turns are
  * mapped to the Gemini `contents` array.
  *
- * Default model: gemini-2.5-flash (stable, free tier available).
- * gemini-2.0-flash is deprecated and shuts down 2026-06-01.
+ * Default model: gemini-3.5-flash.
  */
 export async function askGemini(
   prompt: string | undefined,
   params: GeminiParams,
   messages?: ChatMessage[]
 ): Promise<AskAIResponse> {
-  const model = params.model ?? 'gemini-2.5-flash';
+  const model = params.model ?? 'gemini-3.5-flash';
 
   // Separate system messages from conversation turns
   const systemMessages = messages?.filter((m) => m.role === 'system') ?? [];
@@ -59,6 +62,20 @@ export async function askGemini(
   // Determine if JSON mode should be enabled
   const useJson = params.jsonMode === true || !!params.responseSchema;
 
+  // ── Thinking config (Gemini 3.x) ──────────────────────────────────────────
+  // Map our lowecase GeminiThinkingLevel strings to the SDK's uppercase
+  // ThinkingLevel enum values (e.g. 'minimal' → ThinkingLevel.MINIMAL).
+  const THINKING_LEVEL_MAP: Record<string, ThinkingLevel> = {
+    minimal: ThinkingLevel.MINIMAL,
+    low: ThinkingLevel.LOW,
+    medium: ThinkingLevel.MEDIUM,
+    high: ThinkingLevel.HIGH,
+  };
+  const thinkingLevelKey = params.thinkingLevel ?? 'minimal';
+  const thinkingLevel = THINKING_LEVEL_MAP[thinkingLevelKey] ?? ThinkingLevel.MINIMAL;
+  const includeThoughts = params.includeThoughts ?? false;
+  const thinkingConfig = { thinkingLevel, includeThoughts };
+
   try {
     const response = await client.models.generateContent({
       model,
@@ -72,8 +89,20 @@ export async function askGemini(
         ...(useJson ? { responseMimeType: 'application/json' } : {}),
         ...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
+        thinkingConfig,
       },
     });
+
+    // Log token usage — useful for tuning thinkingLevel per feature
+    const usage = response.usageMetadata;
+    if (usage) {
+      console.log(
+        `[askGemini] model=${model}` +
+        ` input=${usage.promptTokenCount ?? 0}` +
+        ` output=${usage.candidatesTokenCount ?? 0}` +
+        ` thinking=${(usage as any).thoughtsTokenCount ?? 0}`
+      );
+    }
 
     // Safely extract text via candidates to avoid silent empty string from the .text getter
     // (can return '' when finishReason is not STOP, e.g. MAX_TOKENS or safety blocks)

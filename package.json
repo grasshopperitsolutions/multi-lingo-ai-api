@@ -2,7 +2,7 @@
   "name": "multi-lingo-ai-api",
   "version": "1.0.0",
   "dependencies": {
-    "@google/genai": "^2.4.0",
+    "@google/genai": "^2.8.0",
     "firebase-admin": "^13.8.0",
     "openai": "^6.38.0"
   },
