@@ -1,6 +1,7 @@
 import { IncomingMessage, ServerResponse } from 'http';
 
 export type VercelRequest = IncomingMessage & {
+  req?: any;
   body?: any;
   query?: any;
 };
@@ -57,17 +58,25 @@ export interface PerplexityParams {
 }
 
 /**
+ * Thinking level for Gemini 3.x models.
+ * Controls how many reasoning tokens the model uses before responding.
+ * 'minimal' = fewest tokens; 'high' = most thorough reasoning.
+ * Has no effect on Gemini 2.x models.
+ */
+export type GeminiThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
+
+/**
  * Gemini (@google/genai SDK) parameter surface.
  * Uses `config` block with generationConfig fields.
  * responseMimeType + responseSchema enforce structured JSON output.
  */
 export interface GeminiParams {
   provider: 'gemini';
-  model?: string;              // default: 'gemini-2.0-flash'
+  model?: string;              // default: 'gemini-3.5-flash'
   temperature?: number;        // 0–2, default: 0.8
-  maxOutputTokens?: number;    // default: 300
+  maxOutputTokens?: number;    // default: 1024
   topP?: number;               // 0–1, default: 0.9
-  topK?: number;               // integer, default: 40
+  topK?: number;               // integer, SDK default if omitted
   stopSequences?: string[];    // stop sequence(s)
   /**
    * When true, enforces JSON output via responseMimeType: 'application/json'.
@@ -82,6 +91,22 @@ export interface GeminiParams {
    */
   responseSchema?: Record<string, unknown>;
   systemInstruction?: string;  // system-level prompt prepended before contents
+
+  // ── Gemini 3.x thinking controls ─────────────────────────────────────────
+  /**
+   * Controls how much reasoning the model performs before responding.
+   * 'minimal' = fewest thinking tokens (cheapest, fastest).
+   * 'high'    = most thorough reasoning (most tokens, slowest).
+   * Default (when omitted by caller): 'minimal'.
+   * Gemini 3.x only — no effect on 2.x models.
+   */
+  thinkingLevel?: GeminiThinkingLevel;
+  /**
+   * Whether to include the model's summarised thinking in the response output.
+   * Keep false in production — it adds tokens and surfaces internal reasoning.
+   * Default: false.
+   */
+  includeThoughts?: boolean;
 }
 
 export type ProviderParams = OpenAIParams | PerplexityParams | GeminiParams;
