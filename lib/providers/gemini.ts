@@ -3,6 +3,11 @@ import type { GeminiParams, AskAIResponse, ChatMessage } from '../types';
 
 const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
 
+// Default TTS model — gemini-2.5-flash-preview-tts is the current stable preview.
+// gemini-3.5-flash-preview-tts does NOT exist and should never be used.
+const DEFAULT_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
+const DEFAULT_TTS_VOICE = 'Sulafat';
+
 /**
  * Sends a prompt to Gemini using the @google/genai SDK.
  *
@@ -22,6 +27,12 @@ const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
  *  - `thinkingConfig.includeThoughts`: Whether to return summarised thinking
  *    in the response. Keep false in production. Default: false.
  *
+ * TTS mode (params.tts === true):
+ *  - Uses responseModalities: ['AUDIO'] with speechConfig.
+ *  - Default model: gemini-2.5-flash-preview-tts.
+ *  - Default voice: Sulafat.
+ *  - Returns audioData (Base64) and mimeType instead of text.
+ *
  * Conversation history: 'system' role messages from ChatMessage[] are
  * forwarded as systemInstruction. 'user'/'assistant' ('model') turns are
  * mapped to the Gemini `contents` array.
@@ -33,6 +44,11 @@ export async function askGemini(
   params: GeminiParams,
   messages?: ChatMessage[]
 ): Promise<AskAIResponse> {
+  // Route to TTS branch if requested
+  if (params.tts === true) {
+    return _askGeminiTts(prompt, params);
+  }
+
   const model = params.model ?? 'gemini-3.5-flash';
 
   // Separate system messages from conversation turns
@@ -63,7 +79,7 @@ export async function askGemini(
   const useJson = params.jsonMode === true || !!params.responseSchema;
 
   // ── Thinking config (Gemini 3.x) ──────────────────────────────────────────
-  // Map our lowecase GeminiThinkingLevel strings to the SDK's uppercase
+  // Map our lowercase GeminiThinkingLevel strings to the SDK's uppercase
   // ThinkingLevel enum values (e.g. 'minimal' → ThinkingLevel.MINIMAL).
   const THINKING_LEVEL_MAP: Record<string, ThinkingLevel> = {
     minimal: ThinkingLevel.MINIMAL,
@@ -116,31 +132,104 @@ export async function askGemini(
 
     return { text, provider: 'gemini', model };
   } catch (err: any) {
-    const code: number = err?.status ?? err?.code ?? err?.response?.status ?? 500;
-    const rawMessage: string = err?.message ?? '';
+    throw _mapGeminiError(err, model);
+  }
+}
 
-    if (code === 404 || rawMessage.includes('no longer available') || rawMessage.includes('NOT_FOUND')) {
-      throw Object.assign(
-        new Error(`Gemini model "${model}" is unavailable or deprecated. Please select a different model.`),
-        { status: 422 }
-      );
-    }
-    if (code === 429) {
-      throw Object.assign(
-        new Error('Gemini rate limit reached. Please try again shortly.'),
-        { status: 429 }
-      );
-    }
-    if (code === 401 || code === 403) {
-      throw Object.assign(
-        new Error('Gemini API key is invalid or lacks the required permissions.'),
-        { status: 401 }
-      );
-    }
+// ---------------------------------------------------------------------------
+// TTS branch — audio output via responseModalities: ['AUDIO']
+// ---------------------------------------------------------------------------
 
+async function _askGeminiTts(
+  prompt: string | undefined,
+  params: GeminiParams
+): Promise<AskAIResponse> {
+  const model = params.model ?? DEFAULT_TTS_MODEL;
+  const voice = params.voice ?? DEFAULT_TTS_VOICE;
+  const text = prompt ?? '';
+
+  if (!text.trim()) {
     throw Object.assign(
-      new Error('Gemini request failed. Please try again.'),
-      { status: 500 }
+      new Error('TTS prompt must not be empty.'),
+      { status: 400 }
     );
   }
+
+  try {
+    const response = await client.models.generateContent({
+      model,
+      contents: [{ role: 'user', parts: [{ text }] }],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: voice },
+          },
+        },
+      } as any,
+    });
+
+    const candidate = response.candidates?.[0];
+    const part = candidate?.content?.parts?.[0];
+    const inlineData = (part as any)?.inlineData;
+
+    if (!inlineData?.data) {
+      console.warn(`[askGemini/tts] No audio data in response. model=${model} voice=${voice}`);
+      throw Object.assign(
+        new Error('Gemini TTS returned no audio data.'),
+        { status: 500 }
+      );
+    }
+
+    console.log(
+      `[askGemini/tts] model=${model} voice=${voice}` +
+      ` mimeType=${inlineData.mimeType ?? 'unknown'}` +
+      ` audioBytes=${Math.round((inlineData.data.length * 3) / 4)}`
+    );
+
+    return {
+      text: '',
+      provider: 'gemini',
+      model,
+      audioData: inlineData.data,
+      mimeType: inlineData.mimeType ?? 'audio/wav',
+    };
+  } catch (err: any) {
+    // Re-throw if already mapped
+    if (err?.status) throw err;
+    throw _mapGeminiError(err, model);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared error mapping
+// ---------------------------------------------------------------------------
+
+function _mapGeminiError(err: any, model: string): Error {
+  const code: number = err?.status ?? err?.code ?? err?.response?.status ?? 500;
+  const rawMessage: string = err?.message ?? '';
+
+  if (code === 404 || rawMessage.includes('no longer available') || rawMessage.includes('NOT_FOUND')) {
+    return Object.assign(
+      new Error(`Gemini model "${model}" is unavailable or deprecated. Please select a different model.`),
+      { status: 422 }
+    );
+  }
+  if (code === 429) {
+    return Object.assign(
+      new Error('Gemini rate limit reached. Please try again shortly.'),
+      { status: 429 }
+    );
+  }
+  if (code === 401 || code === 403) {
+    return Object.assign(
+      new Error('Gemini API key is invalid or lacks the required permissions.'),
+      { status: 401 }
+    );
+  }
+
+  return Object.assign(
+    new Error('Gemini request failed. Please try again.'),
+    { status: 500 }
+  );
 }
