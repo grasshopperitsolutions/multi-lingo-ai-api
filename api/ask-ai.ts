@@ -37,18 +37,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ? 'Daily AI limit reached. Upgrade to Voyager for more.'
       : 'Daily AI limit reached. Upgrade to Maestro for unlimited access.';
 
-    const progressDoc = await db.collection('userGameProgress').doc(uid).get();
-    const progress = progressDoc.data() ?? {};
-
-    const callsDate: string = progress.aiCallsDate ?? '';
-    const callsToday: number = callsDate === today ? (progress.aiCallsToday ?? 0) : 0;
+    const callsDate: string = userData.aiCallsDate ?? '';
+    const callsToday: number = callsDate === today ? (userData.aiCallsToday ?? 0) : 0;
 
     if (callsToday >= dailyLimit) {
       return errorResponse(res, upgradeMessage, 429);
     }
 
     // Increment counter — non-blocking to keep latency low
-    db.collection('userGameProgress').doc(uid).set(
+    db.collection('users').doc(uid).set(
       { aiCallsToday: callsToday + 1, aiCallsDate: today, updatedAt: FieldValue.serverTimestamp() },
       { merge: true }
     );
