@@ -15,7 +15,7 @@ export type VercelResponse = ServerResponse & {
 // AI Provider Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type ProviderName = 'openai' | 'perplexity' | 'gemini';
+export type ProviderName = 'openai' | 'perplexity' | 'gemini' | 'azure-tts';
 
 export interface OpenAIParams {
   provider: 'openai';
@@ -153,4 +153,36 @@ export interface AskAIResponse {
   audioData?: string;
   /** MIME type of the audio data, e.g. 'audio/wav'. Present only for TTS responses. */
   mimeType?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TTS Endpoint Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Request body for POST /api/tts
+ * The frontend is provider-agnostic — it never specifies Azure or Gemini.
+ * The API resolves the provider and voice internally via tts-router.ts.
+ */
+export interface TtsRequest {
+  /** The text to synthesise. */
+  text: string;
+  /** BCP-47 locale, e.g. 'pt-PT', 'en-US', 'es-MX'. */
+  locale: string;
+  /** Voice gender preference. Defaults to 'female' if omitted. */
+  gender?: 'female' | 'male';
+}
+
+/**
+ * Response body for POST /api/tts
+ */
+export interface TtsResponse {
+  /** Base64-encoded audio data. */
+  audioData: string;
+  /** MIME type, e.g. 'audio/mpeg' (Azure) or 'audio/wav' (Gemini). */
+  mimeType: string;
+  /** Resolved provider, for debugging/logging purposes. */
+  provider: 'azure' | 'gemini';
+  /** Resolved voice ID used, for debugging/logging purposes. */
+  voice: string;
 }
