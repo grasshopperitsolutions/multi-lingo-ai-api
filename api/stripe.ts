@@ -8,7 +8,7 @@ import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
 import type { VercelRequest, VercelResponse, SubscriptionTier, StripeCheckoutRequest } from '../lib/types';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: '2025-05-28.basil',
+  apiVersion: '2025-02-24.acacia',
 });
 
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET!;
