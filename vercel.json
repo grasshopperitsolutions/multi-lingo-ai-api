@@ -26,11 +26,5 @@
     "api/**/*.ts": {
       "maxDuration": 25
     }
-  },
-  "rewrites": [
-    {
-      "source": "/api/stripe-webhook",
-      "destination": "/api/stripe-webhook"
-    }
-  ]
+  }
 }
