@@ -4,8 +4,12 @@ import { verifyAuth } from '../lib/verify-auth';
 import { askOpenAI } from '../lib/providers/openai';
 import { askPerplexity } from '../lib/providers/perplexity';
 import { askGemini } from '../lib/providers/gemini';
+import { db, FieldValue } from '../lib/firebase-admin';
 import { log, logInfo, logError, startTimer } from '../lib/logger';
-import type { VercelRequest, VercelResponse, AskAIRequest } from '../lib/types';
+import type { VercelRequest, VercelResponse, AskAIRequest, SubscriptionTier } from '../lib/types';
+
+const EXPLORER_DAILY_LIMIT = 3;
+const VOYAGER_DAILY_LIMIT = 20;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
@@ -19,6 +23,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const uid = await verifyAuth(req, res);
   if (!uid) return;
+
+  // ── Subscription quota check ──────────────────────────────────────────────
+  const userDoc = await db.collection('users').doc(uid).get();
+  const userData = userDoc.data() ?? {};
+  const tier: SubscriptionTier = userData.subscriptionTier ?? 'explorer';
+
+  const today = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
+
+  if (tier === 'explorer' || tier === 'voyager') {
+    const dailyLimit = tier === 'explorer' ? EXPLORER_DAILY_LIMIT : VOYAGER_DAILY_LIMIT;
+    const upgradeMessage = tier === 'explorer'
+      ? 'Daily AI limit reached. Upgrade to Voyager for more.'
+      : 'Daily AI limit reached. Upgrade to Maestro for unlimited access.';
+
+    const callsDate: string = userData.aiCallsDate ?? '';
+    const callsToday: number = callsDate === today ? (userData.aiCallsToday ?? 0) : 0;
+
+    if (callsToday >= dailyLimit) {
+      return errorResponse(res, upgradeMessage, 429);
+    }
+
+    // Increment counter — non-blocking to keep latency low
+    db.collection('users').doc(uid).set(
+      { aiCallsToday: callsToday + 1, aiCallsDate: today, updatedAt: FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+  }
+  // maestro: no daily limit — falls through
+  // ─────────────────────────────────────────────────────────────────────────
 
   const body = req.body as AskAIRequest;
 
@@ -40,6 +73,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     method: req.method,
     provider,
     model,
+    tier,
     promptLength,
     messageCount,
   });
@@ -64,6 +98,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       method: req.method,
       provider,
       model: result.model ?? model,
+      tier,
       statusCode: 200,
       durationMs: elapsed(),
       promptLength,
@@ -83,6 +118,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       method: req.method,
       provider,
       model,
+      tier,
       statusCode: httpStatus,
       durationMs: elapsed(),
       errorMessage: message,

@@ -1,12 +1,19 @@
 {
   "name": "multi-lingo-ai-api",
   "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc"
+  },
   "dependencies": {
     "@google/genai": "^2.8.0",
-    "firebase-admin": "^13.8.0",
-    "openai": "^6.38.0"
+    "firebase-admin": "^13.10.0",
+    "micro": "^10.0.1",
+    "openai": "^6.42.0",
+    "stripe": "^17.7.0"
   },
   "devDependencies": {
-    "typescript": "^6.0.3"
+    "@types/node": "^22.19.21",
+    "typescript": "^5.9.3"
   }
 }

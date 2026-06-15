@@ -154,3 +154,24 @@ export interface AskAIResponse {
   /** MIME type of the audio data, e.g. 'audio/wav'. Present only for TTS responses. */
   mimeType?: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Subscription / Stripe Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The three subscription tiers for Multi Lingo AI. */
+export type SubscriptionTier = 'explorer' | 'voyager' | 'maestro';
+
+export interface StripeCheckoutRequest {
+  priceId: string;
+}
+
+export interface StripeUserFields {
+  subscriptionTier: SubscriptionTier;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  /** 'trialing' | 'active' | 'past_due' | 'canceled' */
+  subscriptionStatus?: string;
+  /** Unix timestamp of the current billing period end. */
+  currentPeriodEnd?: number;
+}
