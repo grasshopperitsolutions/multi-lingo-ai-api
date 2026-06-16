@@ -11,6 +11,14 @@ import type { VercelRequest, VercelResponse, AskAIRequest, SubscriptionTier } fr
 const EXPLORER_DAILY_LIMIT = 3;
 const VOYAGER_DAILY_LIMIT = 20;
 
+/**
+ * When LIMITS_ENFORCED=true  → tier-based daily quotas are active (Explorer: 3/day, Voyager: 20/day).
+ * When LIMITS_ENFORCED=false (default) → limits are paused; everyone is treated as Explorer
+ *   for display purposes but no requests are ever blocked. Useful during testing/beta.
+ * Flip this env var in Vercel dashboard — no code changes needed.
+ */
+const LIMITS_ENFORCED = process.env.LIMITS_ENFORCED === 'true';
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
   if (handleCors(req, res)) return;
@@ -27,11 +35,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // ── Subscription quota check ──────────────────────────────────────────────
   const userDoc = await db.collection('users').doc(uid).get();
   const userData = userDoc.data() ?? {};
-  const tier: SubscriptionTier = userData.subscriptionTier ?? 'explorer';
+
+  // During testing (LIMITS_ENFORCED=false) everyone is treated as explorer;
+  // no limits are enforced and no counters are written.
+  const tier: SubscriptionTier = LIMITS_ENFORCED
+    ? (userData.subscriptionTier ?? 'explorer')
+    : 'explorer';
 
   const today = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
 
-  if (tier === 'explorer' || tier === 'voyager') {
+  if (LIMITS_ENFORCED && (tier === 'explorer' || tier === 'voyager')) {
     const dailyLimit = tier === 'explorer' ? EXPLORER_DAILY_LIMIT : VOYAGER_DAILY_LIMIT;
     const upgradeMessage = tier === 'explorer'
       ? 'Daily AI limit reached. Upgrade to Voyager for more.'
@@ -51,6 +64,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     );
   }
   // maestro: no daily limit — falls through
+  // LIMITS_ENFORCED=false: no limit, no counter write — falls through
   // ─────────────────────────────────────────────────────────────────────────
 
   const body = req.body as AskAIRequest;
