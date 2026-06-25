@@ -15,6 +15,21 @@ const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET!;
 const FRONTEND_URL = process.env.FRONTEND_URL!;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Price ID map — resolved server-side from plan + interval
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PRICE_ID_MAP: Record<string, Record<string, string | undefined>> = {
+  voyager: {
+    monthly: process.env.STRIPE_PRICE_VOYAGER_MONTHLY,
+    yearly:  process.env.STRIPE_PRICE_VOYAGER_YEARLY,
+  },
+  maestro: {
+    monthly: process.env.STRIPE_PRICE_MAESTRO_MONTHLY,
+    yearly:  process.env.STRIPE_PRICE_MAESTRO_YEARLY,
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -54,10 +69,20 @@ async function handleCheckout(
   uid: string,
   elapsed: () => number
 ) {
-  const { priceId } = req.body as StripeCheckoutRequest;
+  const { plan, interval } = req.body as StripeCheckoutRequest;
+
+  if (!plan || !interval) {
+    return errorResponse(res, 'Missing required fields: plan and interval', 400);
+  }
+
+  const priceId = PRICE_ID_MAP[plan]?.[interval];
 
   if (!priceId) {
-    return errorResponse(res, 'Missing required field: priceId', 400);
+    return errorResponse(
+      res,
+      `Invalid plan/interval combination: ${plan}/${interval}. Valid plans: voyager, maestro. Valid intervals: monthly, yearly.`,
+      400
+    );
   }
 
   const userDoc = await db.collection('users').doc(uid).get();
@@ -89,7 +114,7 @@ async function handleCheckout(
   });
 
   logInfo('stripe_checkout_created', 'stripe', {
-    uid, priceId, sessionId: session.id, statusCode: 200, durationMs: elapsed(),
+    uid, plan, interval, priceId, sessionId: session.id, statusCode: 200, durationMs: elapsed(),
   });
 
   return successResponse(res, { url: session.url });
