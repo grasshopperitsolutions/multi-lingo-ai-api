@@ -162,8 +162,14 @@ export interface AskAIResponse {
 /** The three subscription tiers for Multi Lingo AI. */
 export type SubscriptionTier = 'explorer' | 'voyager' | 'maestro';
 
+/**
+ * Payload sent by the frontend for the 'checkout' action.
+ * The backend maps plan + interval to the Stripe Price ID using env vars,
+ * keeping all price IDs server-side.
+ */
 export interface StripeCheckoutRequest {
-  priceId: string;
+  plan: 'voyager' | 'maestro';
+  interval: 'monthly' | 'yearly';
 }
 
 export interface StripeUserFields {
