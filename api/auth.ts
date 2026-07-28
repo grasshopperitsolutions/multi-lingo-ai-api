@@ -106,7 +106,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   /**
    * POST /api/auth
-   * Handles social login actions: google, apple, facebook, twitter.
+   * Handles social login actions. Only `google` is fully implemented today;
+   * `apple`, `facebook`, and `twitter` are recognized but rejected with a
+   * 501 until their provider setup is complete — this is the single source
+   * of truth for which social providers are actually available.
    */
   if (req.method !== 'POST') {
     return errorResponse(res, 'Method not allowed', 405);
@@ -127,10 +130,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return successResponse(res, { message: 'Logged out successfully' });
       }
 
-      case 'google':
       case 'apple':
       case 'facebook':
       case 'twitter': {
+        const providerLabels: Record<string, string> = {
+          apple: 'Apple',
+          facebook: 'Facebook',
+          twitter: 'X',
+        };
+
+        logInfo('social_login_not_implemented', 'auth', {
+          method: req.method,
+          provider: action,
+          statusCode: 501,
+          durationMs: elapsed(),
+        });
+
+        return errorResponse(res, `Sign-in with ${providerLabels[action]} is not yet available`, 501);
+      }
+
+      case 'google': {
         const { idToken } = req.body;
 
         if (!idToken) {
