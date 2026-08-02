@@ -56,6 +56,29 @@ const ALLOWED_OPS = new Set([
 /** Default query limit when the caller does not specify one. */
 const DEFAULT_QUERY_LIMIT = 100;
 
+/**
+ * Fields on the `users` collection that are only ever set by server-side
+ * logic (the Stripe webhook handler, the ask-ai quota counter) — never
+ * accepted from a client-authored PUT/PATCH, even on the caller's own doc.
+ */
+const PROTECTED_USER_FIELDS = [
+  'subscriptionTier',
+  'subscriptionStatus',
+  'stripeCustomerId',
+  'stripeSubscriptionId',
+  'currentPeriodEnd',
+  'aiCallsToday',
+  'aiCallsDate',
+];
+
+function stripProtectedUserFields(data: Record<string, unknown>): Record<string, unknown> {
+  const cleaned = { ...data };
+  for (const field of PROTECTED_USER_FIELDS) {
+    delete cleaned[field];
+  }
+  return cleaned;
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
 
@@ -282,7 +305,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
 
         const isTopLevel = !collection.includes('/');
-        if (isTopLevel && collection !== 'users') {
+        let sanitizedData = data;
+
+        if (isTopLevel && collection === 'users') {
+          if (id !== uid) {
+            logWarn('firestore_auth_denied', 'firestore', {
+              uid,
+              method: req.method,
+              collection,
+              docId: id,
+              statusCode: 403,
+              durationMs: elapsed(),
+            });
+            return errorResponse(res, 'Unauthorized to update this document', 403);
+          }
+          sanitizedData = stripProtectedUserFields(data);
+        } else if (isTopLevel) {
           const docData = doc.data();
           if (docData?.createdBy && docData.createdBy !== uid) {
             logWarn('firestore_auth_denied', 'firestore', {
@@ -298,7 +336,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
 
         const updateData = {
-          ...data,
+          ...sanitizedData,
           updatedBy: uid,
           updatedAt: FieldValue.serverTimestamp(),
         };
@@ -345,8 +383,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'Document not found', 404);
         }
 
+        const isTopLevelPatch = !collection.includes('/');
+        let sanitizedPatchData = data;
+
+        if (isTopLevelPatch && collection === 'users') {
+          if (id !== uid) {
+            logWarn('firestore_auth_denied', 'firestore', {
+              uid,
+              method: req.method,
+              collection,
+              docId: id,
+              statusCode: 403,
+              durationMs: elapsed(),
+            });
+            return errorResponse(res, 'Unauthorized to update this document', 403);
+          }
+          sanitizedPatchData = stripProtectedUserFields(data);
+        }
+
         const patchData = {
-          ...data,
+          ...sanitizedPatchData,
           updatedBy: uid,
           updatedAt: FieldValue.serverTimestamp(),
         };

@@ -57,8 +57,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return errorResponse(res, upgradeMessage, 429);
     }
 
-    // Increment counter — non-blocking to keep latency low
-    db.collection('users').doc(uid).set(
+    // Increment counter before proceeding to avoid a race that lets
+    // concurrent requests slip past the daily limit.
+    await db.collection('users').doc(uid).set(
       { aiCallsToday: callsToday + 1, aiCallsDate: today, updatedAt: FieldValue.serverTimestamp() },
       { merge: true }
     );

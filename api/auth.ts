@@ -185,6 +185,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             provider: action,
             interfaceLang: 'en',
             theme: 'light',
+            subscriptionTier: 'explorer',
+            subscriptionStatus: null,
             createdAt: FieldValue.serverTimestamp(),
             updatedAt: FieldValue.serverTimestamp(),
           });

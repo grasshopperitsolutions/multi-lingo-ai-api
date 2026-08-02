@@ -29,6 +29,11 @@ const PRICE_ID_MAP: Record<string, Record<string, string | undefined>> = {
   },
 };
 
+/** Free trial length per plan, in days. Omitted entirely (no trial) for plans not listed here. */
+const TRIAL_DAYS_BY_PLAN: Record<string, number> = {
+  maestro: 7,
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,12 +106,27 @@ async function handleCheckout(
     );
   }
 
+  const trialDays = TRIAL_DAYS_BY_PLAN[plan];
+
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     customer: stripeCustomerId,
     line_items: [{ price: priceId, quantity: 1 }],
+    allow_promotion_codes: true,
+    // Only collect a card if something is actually due today. Combined with
+    // trial_settings below, a trial (or a 100%-off promo code) can be
+    // completed with no payment method on file at all.
+    payment_method_collection: 'if_required',
     subscription_data: {
-      trial_period_days: 7,
+      ...(trialDays
+        ? {
+            trial_period_days: trialDays,
+            // No card on file when the trial ends -> cancel cleanly rather
+            // than attempt a charge. The Stripe webhook already resets the
+            // user's tier back to 'explorer' on customer.subscription.deleted.
+            trial_settings: { end_behavior: { missing_payment_method: 'cancel' } },
+          }
+        : {}),
       metadata: { firebaseUid: uid },
     },
     success_url: `${FRONTEND_URL}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
