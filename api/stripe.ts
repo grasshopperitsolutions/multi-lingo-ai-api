@@ -140,6 +140,69 @@ async function handleCheckout(
   return successResponse(res, { url: session.url });
 }
 
+async function handleChangePlan(
+  req: VercelRequest,
+  res: VercelResponse,
+  uid: string,
+  elapsed: () => number
+) {
+  const { plan } = req.body as { plan?: string };
+
+  if (plan !== 'voyager' && plan !== 'maestro') {
+    return errorResponse(res, 'plan must be "voyager" or "maestro"', 400);
+  }
+
+  const userDoc = await db.collection('users').doc(uid).get();
+  const userData = userDoc.data() ?? {};
+  const subscriptionId: string | undefined = userData.stripeSubscriptionId;
+
+  if (!subscriptionId) {
+    return errorResponse(res, 'No active subscription to change — subscribe first via checkout.', 400);
+  }
+
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+  const currentItem = subscription.items.data[0];
+
+  if (!currentItem) {
+    return errorResponse(res, 'Subscription has no billable item', 400);
+  }
+
+  // Keep whatever billing interval the customer is already on — this is a
+  // plan swap, not a chance to sneak in a monthly<->yearly change too.
+  const currentInterval = currentItem.price.recurring?.interval === 'year' ? 'yearly' : 'monthly';
+  const priceId = PRICE_ID_MAP[plan]?.[currentInterval];
+
+  if (!priceId) {
+    return errorResponse(res, `No price configured for ${plan}/${currentInterval}`, 400);
+  }
+
+  if (currentItem.price.id === priceId) {
+    return errorResponse(res, `Already subscribed to ${plan}.`, 400);
+  }
+
+  const updated = await stripe.subscriptions.update(subscriptionId, {
+    items: [{ id: currentItem.id, price: priceId }],
+    proration_behavior: 'create_prorations',
+  });
+
+  const tier = tierFromPriceId(priceId);
+
+  // Reflect immediately for a snappy UI — the webhook fires moments later
+  // and reconciles the same fields, so this is safe to write eagerly.
+  await db.collection('users').doc(uid).set({
+    subscriptionTier: tier,
+    subscriptionStatus: updated.status,
+    currentPeriodEnd: updated.current_period_end,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  logInfo('stripe_plan_changed', 'stripe', {
+    uid, plan, interval: currentInterval, priceId, subscriptionId, statusCode: 200, durationMs: elapsed(),
+  });
+
+  return successResponse(res, { tier, status: updated.status });
+}
+
 async function handlePortal(
   req: VercelRequest,
   res: VercelResponse,
@@ -322,8 +385,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return await handleCheckout(req, res, uid, elapsed);
       case 'portal':
         return await handlePortal(req, res, uid, elapsed);
+      case 'change_plan':
+        return await handleChangePlan(req, res, uid, elapsed);
       default:
-        return errorResponse(res, `Unknown action: "${action}". Valid actions: checkout, portal`, 400);
+        return errorResponse(res, `Unknown action: "${action}". Valid actions: checkout, portal, change_plan`, 400);
     }
   } catch (err: any) {
     logError('stripe_action_error', 'stripe', {
