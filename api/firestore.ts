@@ -67,6 +67,7 @@ const PROTECTED_USER_FIELDS = [
   'stripeCustomerId',
   'stripeSubscriptionId',
   'currentPeriodEnd',
+  'cancelAtPeriodEnd',
   'aiCallsToday',
   'aiCallsDate',
 ];

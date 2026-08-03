@@ -126,8 +126,12 @@ async function handleCheckout(
         : {}),
       metadata: { firebaseUid: uid },
     },
+    // One shared result page for every outcome — see handlePortal()'s comment
+    // for why (the Portal can only ever have one return_url, so the result
+    // page already has to read Firestore state to know what happened; reusing
+    // it here too means success and cancel don't need separate pages).
     success_url: `${FRONTEND_URL}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${FRONTEND_URL}/subscription/cancel`,
+    cancel_url: `${FRONTEND_URL}/subscription/success`,
   });
 
   logInfo('stripe_checkout_created', 'stripe', {
@@ -137,16 +141,26 @@ async function handleCheckout(
   return successResponse(res, { url: session.url });
 }
 
-async function handleChangePlan(
+async function handlePortalPlanChange(
   req: VercelRequest,
   res: VercelResponse,
   uid: string,
   elapsed: () => number
 ) {
-  const { plan } = req.body as { plan?: string };
+  const { plan, interval } = req.body as StripeCheckoutRequest;
 
-  if (plan !== 'voyager' && plan !== 'maestro') {
-    return errorResponse(res, 'plan must be "voyager" or "maestro"', 400);
+  if (!plan || !interval) {
+    return errorResponse(res, 'Missing required fields: plan and interval', 400);
+  }
+
+  const priceId = PRICE_ID_MAP[plan]?.[interval];
+
+  if (!priceId) {
+    return errorResponse(
+      res,
+      `Invalid plan/interval combination: ${plan}/${interval}. Valid plans: voyager, maestro. Valid intervals: monthly, yearly.`,
+      400
+    );
   }
 
   const userDoc = await db.collection('users').doc(uid).get();
@@ -164,40 +178,31 @@ async function handleChangePlan(
     return errorResponse(res, 'Subscription has no billable item', 400);
   }
 
-  // Keep whatever billing interval the customer is already on — this is a
-  // plan swap, not a chance to sneak in a monthly<->yearly change too.
-  const currentInterval = currentItem.price.recurring?.interval === 'year' ? 'yearly' : 'monthly';
-  const priceId = PRICE_ID_MAP[plan]?.[currentInterval];
-
-  if (!priceId) {
-    return errorResponse(res, `No price configured for ${plan}/${currentInterval}`, 400);
-  }
-
   if (currentItem.price.id === priceId) {
-    return errorResponse(res, `Already subscribed to ${plan}.`, 400);
+    return errorResponse(res, `Already subscribed to ${plan}/${interval}.`, 400);
   }
 
-  const updated = await stripe.subscriptions.update(subscriptionId, {
-    items: [{ id: currentItem.id, price: priceId }],
-    proration_behavior: 'create_prorations',
+  // Deep-links straight into the Portal's plan-change confirmation screen
+  // for this specific price — skips Stripe's own plan picker since the
+  // customer already chose on our Pricing page. Requires "Update subscription"
+  // enabled in the Stripe Dashboard's Customer Portal settings.
+  const portalSession = await stripe.billingPortal.sessions.create({
+    customer: subscription.customer as string,
+    return_url: `${FRONTEND_URL}/subscription/success`,
+    flow_data: {
+      type: 'subscription_update_confirm',
+      subscription_update_confirm: {
+        subscription: subscriptionId,
+        items: [{ id: currentItem.id, price: priceId, quantity: 1 }],
+      },
+    },
   });
 
-  const tier = tierFromPriceId(priceId);
-
-  // Reflect immediately for a snappy UI — the webhook fires moments later
-  // and reconciles the same fields, so this is safe to write eagerly.
-  await db.collection('users').doc(uid).set({
-    subscriptionTier: tier,
-    subscriptionStatus: updated.status,
-    currentPeriodEnd: updated.current_period_end,
-    updatedAt: FieldValue.serverTimestamp(),
-  }, { merge: true });
-
-  logInfo('stripe_plan_changed', 'stripe', {
-    uid, plan, interval: currentInterval, priceId, subscriptionId, statusCode: 200, durationMs: elapsed(),
+  logInfo('stripe_portal_plan_change_created', 'stripe', {
+    uid, plan, interval, priceId, subscriptionId, statusCode: 200, durationMs: elapsed(),
   });
 
-  return successResponse(res, { tier, status: updated.status });
+  return successResponse(res, { url: portalSession.url });
 }
 
 async function handlePortal(
@@ -215,7 +220,11 @@ async function handlePortal(
 
   const portalSession = await stripe.billingPortal.sessions.create({
     customer: stripeCustomerId,
-    return_url: `${FRONTEND_URL}/settings`,
+    // The Portal supports exactly one return_url for every possible action
+    // taken inside it (cancel, update card, view invoices, or nothing) — it
+    // can't branch by outcome. The shared result page reads Firestore state
+    // itself to decide what to show, so one URL is genuinely all we need.
+    return_url: `${FRONTEND_URL}/subscription/success`,
   });
 
   logInfo('stripe_portal_created', 'stripe', {
@@ -276,6 +285,7 @@ async function handleWebhook(
         stripeSubscriptionId: subscriptionId,
         subscriptionStatus: subscription.status,
         currentPeriodEnd: subscription.current_period_end,
+        cancelAtPeriodEnd: subscription.cancel_at_period_end,
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
 
@@ -299,10 +309,14 @@ async function handleWebhook(
         stripeSubscriptionId: subscription.id,
         subscriptionStatus: subscription.status,
         currentPeriodEnd: subscription.current_period_end,
+        // Portal cancellations are deferred to period end by default — the
+        // subscription stays "active" (full access) the whole time, so this
+        // is the only signal the frontend has that a cancellation was scheduled.
+        cancelAtPeriodEnd: subscription.cancel_at_period_end,
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
 
-      logInfo('stripe_webhook_updated', 'stripe', { uid, tier, status: subscription.status, durationMs: elapsed() });
+      logInfo('stripe_webhook_updated', 'stripe', { uid, tier, status: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end, durationMs: elapsed() });
       break;
     }
 
@@ -316,6 +330,7 @@ async function handleWebhook(
         stripeSubscriptionId: null,
         subscriptionStatus: 'canceled',
         currentPeriodEnd: null,
+        cancelAtPeriodEnd: false,
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
 
@@ -382,10 +397,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return await handleCheckout(req, res, uid, elapsed);
       case 'portal':
         return await handlePortal(req, res, uid, elapsed);
-      case 'change_plan':
-        return await handleChangePlan(req, res, uid, elapsed);
+      case 'portal_change_plan':
+        return await handlePortalPlanChange(req, res, uid, elapsed);
       default:
-        return errorResponse(res, `Unknown action: "${action}". Valid actions: checkout, portal, change_plan`, 400);
+        return errorResponse(res, `Unknown action: "${action}". Valid actions: checkout, portal, portal_change_plan`, 400);
     }
   } catch (err: any) {
     logError('stripe_action_error', 'stripe', {
