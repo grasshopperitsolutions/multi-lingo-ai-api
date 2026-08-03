@@ -1,28 +1,11 @@
-import { auth, db, storage, FieldValue } from '../lib/firebase-admin';
+import { auth, db, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
-import { stripe } from '../lib/stripe';
-import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
+import { requireAdmin } from '../lib/require-admin';
+import { deleteUserAccount } from '../lib/delete-user-account';
+import { logInfo, logError, startTimer } from '../lib/logger';
 import type { VercelRequest, VercelResponse } from '../lib/types';
-
-/**
- * Recursively deletes all sub-collections under a Firestore document.
- * Firebase Admin does NOT cascade-delete sub-collections automatically.
- */
-async function deleteSubCollections(docPath: string): Promise<void> {
-  const docRef = db.doc(docPath);
-  const subCollections = await docRef.listCollections();
-  for (const subCol of subCollections) {
-    const snap = await subCol.get();
-    const batch = db.batch();
-    snap.docs.forEach((d) => batch.delete(d.ref));
-    if (!snap.empty) await batch.commit();
-    for (const d of snap.docs) {
-      await deleteSubCollections(d.ref.path);
-    }
-  }
-}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
@@ -31,77 +14,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   /**
    * DELETE /api/auth
-   * Permanently deletes the authenticated user's entire account.
+   * Permanently deletes the authenticated user's entire account. Also used
+   * by the admin Users panel to delete *another* user's account — pass
+   * `{ uid: targetUid }` in the body, which requires the caller to be an
+   * admin. Omitting the body (or matching your own uid) keeps this the
+   * plain self-service delete it always was.
    */
   if (req.method === 'DELETE') {
     const elapsed = startTimer();
     const uid = await verifyAuth(req, res);
     if (!uid) return;
 
-    logInfo('account_delete_start', 'auth', { uid, method: req.method });
+    const requestedTarget = req.body?.uid as string | undefined;
+    let targetUid = uid;
+
+    if (requestedTarget && requestedTarget !== uid) {
+      if (!(await requireAdmin(uid, req, res))) return;
+
+      try {
+        await auth.getUser(requestedTarget);
+      } catch {
+        return errorResponse(res, 'User not found', 404);
+      }
+
+      targetUid = requestedTarget;
+    }
+
+    logInfo('account_delete_start', 'auth', { uid, targetUid, method: req.method });
 
     try {
-      // 1. Cancel any active Stripe subscription (best-effort, non-fatal) —
-      //    deleting the account must not leave the customer billed forever
-      //    for a service they can no longer access.
-      const userDocRef = db.collection('users').doc(uid);
-      const userDoc = await userDocRef.get();
-      const subscriptionId = userDoc.data()?.stripeSubscriptionId;
-
-      if (subscriptionId) {
-        try {
-          await stripe.subscriptions.cancel(subscriptionId);
-        } catch (stripeErr: any) {
-          logWarn('account_delete_stripe_cancel_failed', 'auth', {
-            uid,
-            subscriptionId,
-            reason: stripeErr?.message,
-          });
-          console.warn(`Stripe subscription cancel warning uid=${uid}:`, stripeErr?.message);
-        }
-      }
-
-      // 2. Delete Firestore user document + sub-collections
-      if (userDoc.exists) {
-        await deleteSubCollections(`users/${uid}`);
-        await userDocRef.delete();
-      }
-
-      // 3. Delete all documents in the files collection owned by this user
-      try {
-        const filesSnap = await db
-          .collection('files')
-          .where('userId', '==', uid)
-          .get();
-        const batch = db.batch();
-        filesSnap.docs.forEach((doc) => batch.delete(doc.ref));
-        if (!filesSnap.empty) await batch.commit();
-      } catch (firestoreErr: any) {
-        logWarn('account_delete_firestore_cleanup_failed', 'auth', {
-          uid,
-          reason: firestoreErr?.message,
-        });
-        console.warn(`Firestore files cleanup warning uid=${uid}:`, firestoreErr?.message);
-      }
-
-      // 4. Delete all user-uploaded files from Cloud Storage (best-effort, non-fatal)
-      try {
-        const bucket = storage.bucket();
-        await bucket.deleteFiles({ prefix: `avatars/${uid}/` });
-        await bucket.deleteFiles({ prefix: `uploads/${uid}/` });
-      } catch (storageErr: any) {
-        logWarn('account_delete_storage_cleanup_failed', 'auth', {
-          uid,
-          reason: storageErr?.message,
-        });
-        console.warn(`Storage cleanup warning uid=${uid}:`, storageErr?.message);
-      }
-
-      // 5. Delete Firebase Auth account — point of no return
-      await auth.deleteUser(uid);
+      await deleteUserAccount(targetUid);
 
       logInfo('account_deleted', 'auth', {
         uid,
+        targetUid,
         method: req.method,
         statusCode: 200,
         durationMs: elapsed(),
@@ -109,11 +55,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       return successResponse(res, {
         message: 'Account deleted successfully',
-        uid,
+        uid: targetUid,
       });
     } catch (error: any) {
       logError('account_delete_failed', 'auth', {
         uid,
+        targetUid,
         method: req.method,
         statusCode: 500,
         durationMs: elapsed(),

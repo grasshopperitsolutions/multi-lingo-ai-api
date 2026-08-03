@@ -3,6 +3,7 @@ import { db, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
+import { requireAdmin } from '../lib/require-admin';
 import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
 
 /**
@@ -59,10 +60,10 @@ const DEFAULT_QUERY_LIMIT = 100;
 /**
  * Fields on the `users` collection that are only ever set by server-side
  * logic (the Stripe webhook handler, the ask-ai quota counter) — never
- * accepted from a client-authored PUT/PATCH, even on the caller's own doc.
+ * accepted from a client-authored PUT/PATCH, even from an admin caller
+ * editing someone else's doc.
  */
-const PROTECTED_USER_FIELDS = [
-  'subscriptionTier',
+const ALWAYS_PROTECTED_USER_FIELDS = [
   'subscriptionStatus',
   'stripeCustomerId',
   'stripeSubscriptionId',
@@ -72,10 +73,20 @@ const PROTECTED_USER_FIELDS = [
   'aiCallsDate',
 ];
 
-function stripProtectedUserFields(data: Record<string, unknown>): Record<string, unknown> {
+/**
+ * `subscriptionTier` doubles as the user's role (explorer/voyager/maestro/
+ * vip/admin — see tierLimits.js on the frontend). It's protected on
+ * self-edits (no self-service privilege escalation), but an admin caller
+ * editing someone else's doc is allowed to set it — that's how the admin
+ * Users panel assigns the vip/admin tiers.
+ */
+function stripProtectedUserFields(data: Record<string, unknown>, allowTierChange: boolean): Record<string, unknown> {
   const cleaned = { ...data };
-  for (const field of PROTECTED_USER_FIELDS) {
+  for (const field of ALWAYS_PROTECTED_USER_FIELDS) {
     delete cleaned[field];
+  }
+  if (!allowTierChange) {
+    delete cleaned.subscriptionTier;
   }
   return cleaned;
 }
@@ -141,6 +152,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
 
         if (req.query.filters) {
+          // Querying across the whole `users` collection (as opposed to
+          // fetching one already-known uid below) means browsing/searching
+          // everyone's profile data — restrict that to admins only. This is
+          // the read path the admin Users panel uses to list every user.
+          if (collection === 'users') {
+            const callerUid = await verifyAuth(req, res);
+            if (!callerUid) return;
+            if (!(await requireAdmin(callerUid, req, res))) return;
+          }
+
           let filters: Array<{ field: string; op: string; value: unknown }>;
 
           try {
@@ -309,18 +330,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         let sanitizedData = data;
 
         if (isTopLevel && collection === 'users') {
+          // Editing your own doc is always allowed (protected fields get
+          // stripped below). Editing someone else's doc — e.g. the admin
+          // Users panel assigning a role — requires admin, and in that case
+          // subscriptionTier is allowed through (still never Stripe/quota fields).
+          let allowTierChange = false;
           if (id !== uid) {
-            logWarn('firestore_auth_denied', 'firestore', {
-              uid,
-              method: req.method,
-              collection,
-              docId: id,
-              statusCode: 403,
-              durationMs: elapsed(),
-            });
-            return errorResponse(res, 'Unauthorized to update this document', 403);
+            if (!(await requireAdmin(uid, req, res))) return;
+            allowTierChange = true;
           }
-          sanitizedData = stripProtectedUserFields(data);
+          sanitizedData = stripProtectedUserFields(data, allowTierChange);
         } else if (isTopLevel) {
           const docData = doc.data();
           if (docData?.createdBy && docData.createdBy !== uid) {
@@ -388,18 +407,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         let sanitizedPatchData = data;
 
         if (isTopLevelPatch && collection === 'users') {
+          let allowTierChange = false;
           if (id !== uid) {
-            logWarn('firestore_auth_denied', 'firestore', {
-              uid,
-              method: req.method,
-              collection,
-              docId: id,
-              statusCode: 403,
-              durationMs: elapsed(),
-            });
-            return errorResponse(res, 'Unauthorized to update this document', 403);
+            if (!(await requireAdmin(uid, req, res))) return;
+            allowTierChange = true;
           }
-          sanitizedPatchData = stripProtectedUserFields(data);
+          sanitizedPatchData = stripProtectedUserFields(data, allowTierChange);
         }
 
         const patchData = {

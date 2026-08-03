@@ -159,8 +159,12 @@ export interface AskAIResponse {
 // Subscription / Stripe Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The three subscription tiers for Multi Lingo AI. */
-export type SubscriptionTier = 'explorer' | 'voyager' | 'maestro';
+/**
+ * The subscription tiers for Multi Lingo AI. `vip` and `admin` are hidden
+ * tiers not shown on the pricing page — assigned manually via the admin
+ * Users panel (see tierLimits.js on the frontend for the matching enum).
+ */
+export type SubscriptionTier = 'explorer' | 'voyager' | 'maestro' | 'vip' | 'admin';
 
 /**
  * Payload sent by the frontend for the 'checkout' action.
