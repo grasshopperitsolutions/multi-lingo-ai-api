@@ -1,15 +1,12 @@
-import Stripe from 'stripe';
+import type Stripe from 'stripe';
 import { buffer } from 'micro';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
 import { db, FieldValue } from '../lib/firebase-admin';
+import { stripe } from '../lib/stripe';
 import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
 import type { VercelRequest, VercelResponse, SubscriptionTier, StripeCheckoutRequest } from '../lib/types';
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: '2025-02-24.acacia',
-});
 
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET!;
 const FRONTEND_URL = process.env.FRONTEND_URL!;
