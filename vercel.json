@@ -24,7 +24,7 @@
   ],
   "functions": {
     "api/**/*.ts": {
-      "maxDuration": 25
+      "maxDuration": 120
     }
   }
 }
