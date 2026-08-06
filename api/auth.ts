@@ -66,7 +66,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         durationMs: elapsed(),
         errorMessage: error?.message,
       });
-      return errorResponse(res, error.message || 'Account deletion failed', 500);
+      return errorResponse(res, 'Account deletion failed', 500);
     }
   }
 
@@ -196,6 +196,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       durationMs: elapsed(),
       errorMessage: error?.message,
     });
-    return errorResponse(res, error.message || 'Authentication failed', 401);
+    return errorResponse(res, 'Authentication failed', 401);
   }
 }

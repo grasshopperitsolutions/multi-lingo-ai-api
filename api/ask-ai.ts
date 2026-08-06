@@ -11,13 +11,21 @@ import type { VercelRequest, VercelResponse, AskAIRequest, SubscriptionTier } fr
 const EXPLORER_DAILY_LIMIT = 3;
 const VOYAGER_DAILY_LIMIT = 20;
 
+/** Hard caps on request size, independent of any subscription tier. */
+const MAX_PROMPT_LENGTH = 8000;
+const MAX_MESSAGES = 50;
+const MAX_MESSAGE_LENGTH = 8000;
+
 /**
- * When LIMITS_ENFORCED=true  → tier-based daily quotas are active (Explorer: 3/day, Voyager: 20/day).
- * When LIMITS_ENFORCED=false (default) → limits are paused; everyone is treated as Explorer
- *   for display purposes but no requests are ever blocked. Useful during testing/beta.
+ * When LIMITS_ENFORCED=false (opt out explicitly) → limits are paused; everyone is
+ *   treated as Explorer for display purposes but no requests are ever blocked.
+ *   Useful during testing/beta.
+ * Otherwise (default) → tier-based daily quotas are active (Explorer: 3/day, Voyager: 20/day).
+ * This proxy holds paid OpenAI/Gemini/Perplexity API keys, so the default must be
+ * "enforced" — an unset env var previously meant unlimited usage for anyone.
  * Flip this env var in Vercel dashboard — no code changes needed.
  */
-const LIMITS_ENFORCED = process.env.LIMITS_ENFORCED === 'true';
+const LIMITS_ENFORCED = process.env.LIMITS_ENFORCED !== 'false';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
@@ -75,6 +83,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
   if (!body?.prompt && (!body?.messages || body.messages.length === 0)) {
     return errorResponse(res, 'Provide either prompt or a non-empty messages array', 400);
+  }
+  if (body.prompt && body.prompt.length > MAX_PROMPT_LENGTH) {
+    return errorResponse(res, `prompt exceeds the maximum length of ${MAX_PROMPT_LENGTH} characters`, 400);
+  }
+  if (body.messages) {
+    if (body.messages.length > MAX_MESSAGES) {
+      return errorResponse(res, `messages exceeds the maximum of ${MAX_MESSAGES} entries`, 400);
+    }
+    const oversized = body.messages.find((m) => typeof m.content !== 'string' || m.content.length > MAX_MESSAGE_LENGTH);
+    if (oversized) {
+      return errorResponse(res, `each message's content must be ${MAX_MESSAGE_LENGTH} characters or fewer`, 400);
+    }
   }
 
   const { prompt, messages, providerParams } = body;

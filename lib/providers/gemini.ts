@@ -1,5 +1,6 @@
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import type { GeminiParams, AskAIResponse, ChatMessage } from '../types';
+import { logInfo, logWarn } from '../logger';
 
 const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
 
@@ -106,18 +107,25 @@ export async function askGemini(
         ...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
         thinkingConfig,
+        // The @google/genai SDK's own HTTP client defaults to a 60s request
+        // timeout independent of Vercel's maxDuration or the frontend's fetch
+        // timeout — large translation calls were silently getting cut off
+        // here even after those two were raised. Kept just under the
+        // ask-ai function's 120s maxDuration so a slow call still gets a
+        // clean error response instead of Vercel hard-killing the function.
+        httpOptions: { timeout: 100000 },
       },
     });
 
     // Log token usage — useful for tuning thinkingLevel per feature
     const usage = response.usageMetadata;
     if (usage) {
-      console.log(
-        `[askGemini] model=${model}` +
-        ` input=${usage.promptTokenCount ?? 0}` +
-        ` output=${usage.candidatesTokenCount ?? 0}` +
-        ` thinking=${(usage as any).thoughtsTokenCount ?? 0}`
-      );
+      logInfo('gemini_token_usage', 'ask-ai', {
+        model,
+        inputTokens: usage.promptTokenCount ?? 0,
+        outputTokens: usage.candidatesTokenCount ?? 0,
+        thinkingTokens: (usage as any).thoughtsTokenCount ?? 0,
+      });
     }
 
     // Safely extract text via candidates to avoid silent empty string from the .text getter
@@ -127,7 +135,7 @@ export async function askGemini(
     const text = candidate?.content?.parts?.[0]?.text ?? '';
 
     if (!text) {
-      console.warn(`[askGemini] Empty response text. model=${model} finishReason=${finishReason}`);
+      logWarn('gemini_empty_response', 'ask-ai', { model, finishReason });
     }
 
     return { text, provider: 'gemini', model };
@@ -174,18 +182,19 @@ async function _askGeminiTts(
     const inlineData = (part as any)?.inlineData;
 
     if (!inlineData?.data) {
-      console.warn(`[askGemini/tts] No audio data in response. model=${model} voice=${voice}`);
+      logWarn('gemini_tts_no_audio', 'ask-ai', { model, voice });
       throw Object.assign(
         new Error('Gemini TTS returned no audio data.'),
         { status: 500 }
       );
     }
 
-    console.log(
-      `[askGemini/tts] model=${model} voice=${voice}` +
-      ` mimeType=${inlineData.mimeType ?? 'unknown'}` +
-      ` audioBytes=${Math.round((inlineData.data.length * 3) / 4)}`
-    );
+    logInfo('gemini_tts_generated', 'ask-ai', {
+      model,
+      voice,
+      mimeType: inlineData.mimeType ?? 'unknown',
+      audioBytes: Math.round((inlineData.data.length * 3) / 4),
+    });
 
     return {
       text: '',

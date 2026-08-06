@@ -4,6 +4,8 @@ package-lock.json
 
 # Environment variables
 .env
+.env.local
+.env.*.local
 
 # Build output
 dist/
@@ -23,3 +25,6 @@ npm-debug.log*
 
 # Vercel
 .vercel
+
+# Test coverage output
+coverage/

@@ -14,6 +14,14 @@ function sanitizeMetadata(raw: Record<string, unknown> = {}): Record<string, unk
   );
 }
 
+// Only these upload destinations are recognized — anything else is rejected
+// rather than silently accepted as an arbitrary folder name.
+const ALLOWED_UPLOAD_FOLDERS = new Set(['uploads', 'avatars']);
+
+// `avatars` uploads get a public-read ACL (see below), so unlike `uploads`
+// they're restricted to actual image types.
+const ALLOWED_AVATAR_CONTENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
 
@@ -33,10 +41,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'fileName and contentType are required', 400);
         }
 
+        if (!ALLOWED_UPLOAD_FOLDERS.has(folder)) {
+          return errorResponse(
+            res,
+            `Invalid folder. Allowed: ${[...ALLOWED_UPLOAD_FOLDERS].join(', ')}`,
+            400
+          );
+        }
+
+        const isAvatar = folder === 'avatars';
+
+        if (isAvatar && !ALLOWED_AVATAR_CONTENT_TYPES.has(contentType)) {
+          return errorResponse(
+            res,
+            `Invalid contentType for an avatar upload. Allowed: ${[...ALLOWED_AVATAR_CONTENT_TYPES].join(', ')}`,
+            400
+          );
+        }
+
         const bucket = storage.bucket();
         const filePath = `${folder}/${uid}/${Date.now()}_${fileName}`;
         const file = bucket.file(filePath);
-        const isAvatar = folder === 'avatars';
 
         const signedUrlOptions: Parameters<typeof file.getSignedUrl>[0] = {
           action: 'write',
@@ -172,7 +197,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const { fileId, prefix } = req.body;
 
         if (prefix && !fileId) {
-          if (!prefix.includes(uid)) {
+          // Must be scoped to one of this caller's own upload folders — a
+          // substring check (prefix.includes(uid)) previously accepted any
+          // prefix that merely mentioned the uid anywhere in the string,
+          // not just their own folder.
+          const ownPrefixes = [...ALLOWED_UPLOAD_FOLDERS].map((f) => `${f}/${uid}/`);
+          if (!ownPrefixes.some((p) => prefix.startsWith(p))) {
             logWarn('storage_auth_denied', 'storage', {
               uid,
               method: req.method,
@@ -324,6 +354,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       durationMs: elapsed(),
       errorMessage: error?.message,
     });
-    return errorResponse(res, error.message || 'Failed to process storage request', 500);
+    return errorResponse(res, 'Failed to process storage request', 500);
   }
 }

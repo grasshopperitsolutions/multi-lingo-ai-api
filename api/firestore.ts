@@ -3,23 +3,23 @@ import { db, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
-import { requireAdmin } from '../lib/require-admin';
 import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
+import {
+  parseCollectionPath,
+  isUsersCollection,
+  usersSubcollectionOwner,
+  stripProtectedUserFields,
+  authorizeUsersDocAccess,
+  authorizeGenericDocWrite,
+  authorizeGenericDocRead,
+  authorizeUsersScopedRead,
+} from '../lib/firestore-helpers';
 
 /**
  * Resolves a slash-separated collection path to a Firestore CollectionReference.
  */
 function resolveCollection(path: string): FirebaseFirestore.CollectionReference {
-  const segments = path.split('/').map(s => s.trim()).filter(Boolean);
-
-  if (segments.length === 0) {
-    throw new Error('collection path must not be empty');
-  }
-  if (segments.length % 2 === 0) {
-    throw new Error(
-      `Invalid collection path "${path}": path has ${segments.length} segments but a collection path must have an odd number of segments (e.g. "col/docId/subCol").`
-    );
-  }
+  const segments = parseCollectionPath(path);
 
   if (segments.length === 1) {
     return db.collection(segments[0]);
@@ -57,39 +57,8 @@ const ALLOWED_OPS = new Set([
 /** Default query limit when the caller does not specify one. */
 const DEFAULT_QUERY_LIMIT = 100;
 
-/**
- * Fields on the `users` collection that are only ever set by server-side
- * logic (the Stripe webhook handler, the ask-ai quota counter) — never
- * accepted from a client-authored PUT/PATCH, even from an admin caller
- * editing someone else's doc.
- */
-const ALWAYS_PROTECTED_USER_FIELDS = [
-  'subscriptionStatus',
-  'stripeCustomerId',
-  'stripeSubscriptionId',
-  'currentPeriodEnd',
-  'cancelAtPeriodEnd',
-  'aiCallsToday',
-  'aiCallsDate',
-];
-
-/**
- * `subscriptionTier` doubles as the user's role (explorer/voyager/maestro/
- * vip/admin — see tierLimits.js on the frontend). It's protected on
- * self-edits (no self-service privilege escalation), but an admin caller
- * editing someone else's doc is allowed to set it — that's how the admin
- * Users panel assigns the vip/admin tiers.
- */
-function stripProtectedUserFields(data: Record<string, unknown>, allowTierChange: boolean): Record<string, unknown> {
-  const cleaned = { ...data };
-  for (const field of ALWAYS_PROTECTED_USER_FIELDS) {
-    delete cleaned[field];
-  }
-  if (!allowTierChange) {
-    delete cleaned.subscriptionTier;
-  }
-  return cleaned;
-}
+/** Hard cap on query limit regardless of what the caller requests. */
+const MAX_QUERY_LIMIT = 200;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
@@ -113,10 +82,44 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'collection and data are required', 400);
         }
 
+        let segments: string[];
+        try {
+          segments = parseCollectionPath(collection);
+        } catch (e: any) {
+          return errorResponse(res, e.message, 400);
+        }
+
+        let sanitizedData = data;
+        let existingData: Record<string, unknown> | undefined;
+
+        if (id) {
+          const existingSnap = await resolveDocument(collection, id).get();
+          existingData = existingSnap.exists ? existingSnap.data() : undefined;
+        }
+
+        if (isUsersCollection(segments)) {
+          if (!id) {
+            return errorResponse(res, 'id is required when writing to the users collection', 400);
+          }
+          const authResult = await authorizeUsersDocAccess(id, uid, req, res);
+          if (!authResult.ok) return;
+          sanitizedData = stripProtectedUserFields(data, authResult.allowTierChange);
+        } else if (existingData) {
+          // A document already exists at this id — only its owner (or an
+          // admin) may overwrite it via POST. Without this, POSTing a
+          // known/guessed id let anyone hijack any existing document.
+          const authorized = await authorizeGenericDocWrite(existingData, uid, req, res);
+          if (!authorized) return;
+        }
+
+        // Overwriting an existing doc merges onto it rather than replacing
+        // it outright — a full replace would silently wipe any field the
+        // caller didn't happen to include in this request.
         const documentData = {
-          ...data,
-          createdBy: uid,
-          createdAt: FieldValue.serverTimestamp(),
+          ...existingData,
+          ...sanitizedData,
+          createdBy: existingData?.createdBy ?? uid,
+          createdAt: existingData?.createdAt ?? FieldValue.serverTimestamp(),
           updatedAt: FieldValue.serverTimestamp(),
         };
 
@@ -151,16 +154,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'collection is required', 400);
         }
 
+        // Every read requires a signed-in caller — this endpoint previously
+        // allowed fully anonymous document reads and collection queries.
+        const uid = await verifyAuth(req, res);
+        if (!uid) return;
+
+        let segments: string[];
+        try {
+          segments = parseCollectionPath(collection as string);
+        } catch (e: any) {
+          return errorResponse(res, e.message, 400);
+        }
+
         if (req.query.filters) {
           // Querying across the whole `users` collection (as opposed to
           // fetching one already-known uid below) means browsing/searching
           // everyone's profile data — restrict that to admins only. This is
           // the read path the admin Users panel uses to list every user.
-          if (collection === 'users') {
-            const callerUid = await verifyAuth(req, res);
-            if (!callerUid) return;
-            if (!(await requireAdmin(callerUid, req, res))) return;
-          }
+          // Same restriction applies to querying someone else's
+          // users/{uid}/... sub-collection.
+          if (!(await authorizeUsersScopedRead(segments, undefined, uid, req, res))) return;
 
           let filters: Array<{ field: string; op: string; value: unknown }>;
 
@@ -178,8 +191,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           const orderBy = req.query.orderBy as string | undefined;
           const order = (req.query.order as 'asc' | 'desc') || undefined;
-          const limit = req.query.limit
+          const rawLimit = req.query.limit
             ? parseInt(req.query.limit as string, 10)
+            : DEFAULT_QUERY_LIMIT;
+          const limit = Number.isFinite(rawLimit) && rawLimit > 0
+            ? Math.min(rawLimit, MAX_QUERY_LIMIT)
             : DEFAULT_QUERY_LIMIT;
           const startAfter = req.query.startAfter;
 
@@ -218,6 +234,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           if (snapshot.empty) {
             logInfo('firestore_query', 'firestore', {
+              uid,
               method: req.method,
               collection,
               filterCount: filters.length,
@@ -240,6 +257,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const lastVisible = snapshot.docs[snapshot.docs.length - 1];
 
           logInfo('firestore_query', 'firestore', {
+            uid,
             method: req.method,
             collection,
             filterCount: filters.length,
@@ -266,6 +284,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           );
         }
 
+        const isUsersScoped = isUsersCollection(segments) || usersSubcollectionOwner(segments) !== null;
+
+        if (isUsersScoped) {
+          if (!(await authorizeUsersScopedRead(segments, id as string, uid, req, res))) return;
+        }
+
         const docRef = resolveDocument(
           collection as string,
           id as string
@@ -274,6 +298,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         if (!doc.exists) {
           logWarn('firestore_doc_not_found', 'firestore', {
+            uid,
             method: req.method,
             collection,
             docId: id,
@@ -283,7 +308,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'Document not found', 404);
         }
 
+        if (!isUsersScoped) {
+          // Docs outside the users scope have no fixed ownership model —
+          // authorize against whatever createdBy/userId this specific
+          // document declares (see authorizeGenericDocRead). Previously any
+          // authenticated caller could read any document here regardless
+          // of who it actually belonged to.
+          if (!(await authorizeGenericDocRead(doc.data(), uid, req, res))) return;
+        }
+
         logInfo('firestore_read', 'firestore', {
+          uid,
           method: req.method,
           collection,
           docId: id,
@@ -301,83 +336,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // ─────────────────────────────────────────────────────────────────────
       // PUT — partial update
       // ─────────────────────────────────────────────────────────────────────
-      case 'PUT': {
-        const uid = await verifyAuth(req, res);
-        if (!uid) return;
-
-        const { collection, id, data } = req.body;
-
-        if (!collection || !id || !data) {
-          return errorResponse(res, 'collection, id and data are required', 400);
-        }
-
-        const docRef = resolveDocument(collection, id);
-        const doc = await docRef.get();
-
-        if (!doc.exists) {
-          logWarn('firestore_doc_not_found', 'firestore', {
-            uid,
-            method: req.method,
-            collection,
-            docId: id,
-            statusCode: 404,
-            durationMs: elapsed(),
-          });
-          return errorResponse(res, 'Document not found', 404);
-        }
-
-        const isTopLevel = !collection.includes('/');
-        let sanitizedData = data;
-
-        if (isTopLevel && collection === 'users') {
-          // Editing your own doc is always allowed (protected fields get
-          // stripped below). Editing someone else's doc — e.g. the admin
-          // Users panel assigning a role — requires admin, and in that case
-          // subscriptionTier is allowed through (still never Stripe/quota fields).
-          let allowTierChange = false;
-          if (id !== uid) {
-            if (!(await requireAdmin(uid, req, res))) return;
-            allowTierChange = true;
-          }
-          sanitizedData = stripProtectedUserFields(data, allowTierChange);
-        } else if (isTopLevel) {
-          const docData = doc.data();
-          if (docData?.createdBy && docData.createdBy !== uid) {
-            logWarn('firestore_auth_denied', 'firestore', {
-              uid,
-              method: req.method,
-              collection,
-              docId: id,
-              statusCode: 403,
-              durationMs: elapsed(),
-            });
-            return errorResponse(res, 'Unauthorized to update this document', 403);
-          }
-        }
-
-        const updateData = {
-          ...sanitizedData,
-          updatedBy: uid,
-          updatedAt: FieldValue.serverTimestamp(),
-        };
-
-        await docRef.update(updateData);
-
-        logInfo('firestore_update', 'firestore', {
-          uid,
-          method: req.method,
-          collection,
-          docId: id,
-          statusCode: 200,
-          durationMs: elapsed(),
-        });
-
-        return successResponse(res, { id, collection, updated: true });
-      }
-
-      // ─────────────────────────────────────────────────────────────────────
-      // PATCH — deep merge update
-      // ─────────────────────────────────────────────────────────────────────
+      case 'PUT':
       case 'PATCH': {
         const uid = await verifyAuth(req, res);
         if (!uid) return;
@@ -388,6 +347,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'collection, id and data are required', 400);
         }
 
+        let segments: string[];
+        try {
+          segments = parseCollectionPath(collection);
+        } catch (e: any) {
+          return errorResponse(res, e.message, 400);
+        }
+
         const docRef = resolveDocument(collection, id);
         const doc = await docRef.get();
 
@@ -403,27 +369,41 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'Document not found', 404);
         }
 
-        const isTopLevelPatch = !collection.includes('/');
-        let sanitizedPatchData = data;
+        let sanitizedData = data;
+        const subOwner = usersSubcollectionOwner(segments);
 
-        if (isTopLevelPatch && collection === 'users') {
-          let allowTierChange = false;
-          if (id !== uid) {
-            if (!(await requireAdmin(uid, req, res))) return;
-            allowTierChange = true;
-          }
-          sanitizedPatchData = stripProtectedUserFields(data, allowTierChange);
+        if (isUsersCollection(segments)) {
+          // Editing your own doc is always allowed (protected fields get
+          // stripped below). Editing someone else's doc — e.g. the admin
+          // Users panel assigning a role — requires admin, and in that case
+          // subscriptionTier is allowed through (still never Stripe/quota fields).
+          const authResult = await authorizeUsersDocAccess(id, uid, req, res);
+          if (!authResult.ok) return;
+          sanitizedData = stripProtectedUserFields(data, authResult.allowTierChange);
+        } else if (subOwner !== null) {
+          // Anything nested under users/{targetUid}/... is owned by that
+          // target user — previously this shape of path skipped every
+          // ownership check entirely.
+          const authResult = await authorizeUsersDocAccess(subOwner, uid, req, res);
+          if (!authResult.ok) return;
+        } else {
+          // Generic top-level collection: ownership is read off createdBy
+          // (set by this endpoint's own POST) or userId (set by
+          // /api/storage). A document with neither field fails closed —
+          // previously it silently passed the check.
+          const authorized = await authorizeGenericDocWrite(doc.data(), uid, req, res);
+          if (!authorized) return;
         }
 
-        const patchData = {
-          ...sanitizedPatchData,
+        const updateData = {
+          ...sanitizedData,
           updatedBy: uid,
           updatedAt: FieldValue.serverTimestamp(),
         };
 
-        await docRef.update(patchData);
+        await docRef.update(updateData);
 
-        logInfo('firestore_patch', 'firestore', {
+        logInfo(req.method === 'PATCH' ? 'firestore_patch' : 'firestore_update', 'firestore', {
           uid,
           method: req.method,
           collection,
@@ -432,7 +412,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           durationMs: elapsed(),
         });
 
-        return successResponse(res, { id, collection, patched: true });
+        return successResponse(res, {
+          id,
+          collection,
+          [req.method === 'PATCH' ? 'patched' : 'updated']: true,
+        });
       }
 
       // ─────────────────────────────────────────────────────────────────────
@@ -448,6 +432,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'collection and id are required', 400);
         }
 
+        let segments: string[];
+        try {
+          segments = parseCollectionPath(collection);
+        } catch (e: any) {
+          return errorResponse(res, e.message, 400);
+        }
+
+        if (isUsersCollection(segments)) {
+          // A Firestore-only delete would orphan the Stripe subscription,
+          // Storage files, and Firebase Auth record. Route through the
+          // endpoint that cascades all of it (also admin-gated for
+          // cross-user deletes there).
+          return errorResponse(
+            res,
+            'User profile documents cannot be deleted directly. Use DELETE /api/auth to delete a user account.',
+            400
+          );
+        }
+
         const docRef = resolveDocument(collection, id);
         const doc = await docRef.get();
 
@@ -463,17 +466,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'Document not found', 404);
         }
 
-        const docData = doc.data();
-        if (docData?.createdBy && docData.createdBy !== uid) {
-          logWarn('firestore_auth_denied', 'firestore', {
-            uid,
-            method: req.method,
-            collection,
-            docId: id,
-            statusCode: 403,
-            durationMs: elapsed(),
-          });
-          return errorResponse(res, 'Unauthorized to delete this document', 403);
+        const subOwner = usersSubcollectionOwner(segments);
+        if (subOwner !== null) {
+          const authResult = await authorizeUsersDocAccess(subOwner, uid, req, res);
+          if (!authResult.ok) return;
+        } else {
+          const authorized = await authorizeGenericDocWrite(doc.data(), uid, req, res);
+          if (!authorized) return;
         }
 
         await docRef.delete();
@@ -500,10 +499,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       durationMs: elapsed(),
       errorMessage: error?.message,
     });
-    return errorResponse(
-      res,
-      error.message || 'Failed to process Firestore request',
-      500
-    );
+    return errorResponse(res, 'Failed to process Firestore request', 500);
   }
 }

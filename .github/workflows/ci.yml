@@ -2,11 +2,7 @@ name: CI
 
 on:
   push:
-    branches-ignore:
-      - master
   pull_request:
-    branches-ignore:
-      - master
 
 jobs:
   validate:
@@ -26,4 +22,10 @@ jobs:
         run: npm ci
 
       - name: TypeScript check
-        run: npx tsc --noEmit
+        run: npm run typecheck
+
+      - name: Dependency vulnerability audit
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Run tests with coverage
+        run: npm run test:coverage

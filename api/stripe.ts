@@ -8,6 +8,18 @@ import { stripe } from '../lib/stripe';
 import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
 import type { VercelRequest, VercelResponse, SubscriptionTier, StripeCheckoutRequest } from '../lib/types';
 
+// Vercel would otherwise auto-parse the JSON body before this handler runs,
+// consuming the raw request stream and breaking the webhook signature check
+// below (constructEvent needs the exact bytes Stripe signed). Only the
+// webhook path needs the raw body — handleCheckout/handlePortal/etc. still
+// read `req.body` normally, since (per Vercel's fallback behavior with
+// bodyParser disabled) nothing else on this route depends on auto-parsing.
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
 const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET!;
 const FRONTEND_URL = process.env.FRONTEND_URL!;
 
@@ -61,6 +73,25 @@ async function uidFromCustomerId(customerId: string): Promise<string | null> {
   return snapshot.docs[0].id;
 }
 
+/**
+ * Confirms a Stripe customer actually belongs to `uid`, via the
+ * metadata.firebaseUid stamped on it when handleCheckout first creates it.
+ * Defense-in-depth: stripeCustomerId/stripeSubscriptionId on a user's
+ * Firestore doc are already un-writable by any client request (see
+ * ALWAYS_PROTECTED_USER_FIELDS in lib/firestore-helpers.ts), but this
+ * closes the same gap at the Stripe layer too, in case that Firestore doc
+ * is ever populated some other way.
+ */
+async function verifyCustomerOwnership(stripeCustomerId: string, uid: string): Promise<boolean> {
+  try {
+    const customer = await stripe.customers.retrieve(stripeCustomerId);
+    if ((customer as Stripe.DeletedCustomer).deleted) return false;
+    return (customer as Stripe.Customer).metadata?.firebaseUid === uid;
+  } catch {
+    return false;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Action Handlers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,6 +121,11 @@ async function handleCheckout(
   const userDoc = await db.collection('users').doc(uid).get();
   const userData = userDoc.data() ?? {};
   let stripeCustomerId: string = userData.stripeCustomerId ?? '';
+
+  if (stripeCustomerId && !(await verifyCustomerOwnership(stripeCustomerId, uid))) {
+    logWarn('stripe_customer_ownership_mismatch', 'stripe', { uid, stripeCustomerId });
+    return errorResponse(res, 'Stripe customer record is inconsistent with this account. Please contact support.', 409);
+  }
 
   if (!stripeCustomerId) {
     const customer = await stripe.customers.create({
@@ -172,6 +208,12 @@ async function handlePortalPlanChange(
   }
 
   const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+
+  if (!(await verifyCustomerOwnership(subscription.customer as string, uid))) {
+    logWarn('stripe_customer_ownership_mismatch', 'stripe', { uid, subscriptionId });
+    return errorResponse(res, 'Stripe customer record is inconsistent with this account. Please contact support.', 409);
+  }
+
   const currentItem = subscription.items.data[0];
 
   if (!currentItem) {
@@ -216,6 +258,11 @@ async function handlePortal(
 
   if (!stripeCustomerId) {
     return errorResponse(res, 'No active subscription found', 404);
+  }
+
+  if (!(await verifyCustomerOwnership(stripeCustomerId, uid))) {
+    logWarn('stripe_customer_ownership_mismatch', 'stripe', { uid, stripeCustomerId });
+    return errorResponse(res, 'Stripe customer record is inconsistent with this account. Please contact support.', 409);
   }
 
   const portalSession = await stripe.billingPortal.sessions.create({
@@ -381,13 +428,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return await handleWebhook(req, res, elapsed);
     } catch (err: any) {
       logError('stripe_webhook_error', 'stripe', { errorMessage: err?.message, durationMs: elapsed() });
-      return errorResponse(res, err?.message ?? 'Webhook handler failed', 500);
+      return errorResponse(res, 'Webhook handler failed', 500);
     }
   }
 
   // All other actions require Firebase Auth
   const uid = await verifyAuth(req, res);
   if (!uid) return;
+
+  // bodyParser is disabled for this whole route (see `config` above, needed
+  // for the webhook signature check) so req.body was never auto-populated
+  // here — read and parse it ourselves before anything below touches it.
+  let rawBody: Buffer;
+  try {
+    rawBody = await buffer(req as any);
+  } catch {
+    return errorResponse(res, 'Failed to read request body', 400);
+  }
+  try {
+    (req as any).body = rawBody.length > 0 ? JSON.parse(rawBody.toString('utf8')) : {};
+  } catch {
+    return errorResponse(res, 'Invalid JSON body', 400);
+  }
 
   const { action } = req.body ?? {};
 
@@ -406,6 +468,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     logError('stripe_action_error', 'stripe', {
       uid, action, errorMessage: err?.message, statusCode: 500, durationMs: elapsed(),
     });
-    return errorResponse(res, err?.message ?? 'Stripe action failed', 500);
+    return errorResponse(res, 'Stripe action failed', 500);
   }
 }
