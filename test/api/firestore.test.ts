@@ -360,6 +360,125 @@ describe('DELETE /api/firestore — users collection deletion (finding 1.5)', ()
   });
 });
 
+describe('per-collection policy — public app config (appConfig/config/locales, /languages)', () => {
+  it('lets any signed-in caller (e.g. an anonymous/guest session) read a locale doc created by someone else', async () => {
+    __testUtils.seedDoc('appConfig/config/locales', 'pt-PT', { greeting: 'Olá', createdBy: 'admin1' });
+    const { req, res } = createMockReqRes({
+      method: 'GET',
+      headers: bearer(TOKEN_ALICE),
+      query: { collection: 'appConfig/config/locales', id: 'pt-PT' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('lets any signed-in user seed/overwrite a locale doc originally created by someone else', async () => {
+    __testUtils.seedDoc('appConfig/config/locales', 'pt-PT', { greeting: 'Olá', createdBy: 'admin1' });
+    const { req, res } = createMockReqRes({
+      method: 'PATCH',
+      headers: bearer(TOKEN_ALICE),
+      body: { collection: 'appConfig/config/locales', id: 'pt-PT', data: { farewell: 'Adeus' } },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('lets any signed-in user read the languages list via a filtered query', async () => {
+    __testUtils.seedDoc('appConfig/config/languages', 'pt-PT', { name: 'Portuguese', createdBy: 'admin1' });
+    const { req, res } = createMockReqRes({
+      method: 'GET',
+      headers: bearer(TOKEN_BOB),
+      query: { collection: 'appConfig/config/languages', filters: '[]' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.documents.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('per-collection policy — admin-curated app config (appConfig/config/categories)', () => {
+  it('blocks a non-admin signed-in user from creating a category', async () => {
+    const { req, res } = createMockReqRes({
+      method: 'POST',
+      headers: bearer(TOKEN_ALICE),
+      body: { collection: 'appConfig/config/categories', id: 'food', data: { label: 'Food' } },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('allows an admin to create a category', async () => {
+    const { req, res } = createMockReqRes({
+      method: 'POST',
+      headers: bearer(TOKEN_ADMIN),
+      body: { collection: 'appConfig/config/categories', id: 'food', data: { label: 'Food' } },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(201);
+  });
+
+  it('still lets any signed-in user read categories', async () => {
+    __testUtils.seedDoc('appConfig/config/categories', 'food', { label: 'Food', createdBy: 'admin1' });
+    const { req, res } = createMockReqRes({
+      method: 'GET',
+      headers: bearer(TOKEN_ALICE),
+      query: { collection: 'appConfig/config/categories', id: 'food' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+});
+
+describe('per-collection policy — shared word pools (the cross-user gameplay regression)', () => {
+  it('lets a different signed-in user read a wordPool entry created by someone else', async () => {
+    __testUtils.seedDoc('wordPool', 'concept1', { word: 'gato', status: 'ready', createdBy: 'alice' });
+    const { req, res } = createMockReqRes({
+      method: 'GET',
+      headers: bearer(TOKEN_BOB),
+      query: { collection: 'wordPool', id: 'concept1' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('lets a different signed-in user write a translation into a pool entry created by someone else', async () => {
+    __testUtils.seedDoc('wordPool', 'concept1', { word: 'gato', status: 'ready', createdBy: 'alice' });
+    const { req, res } = createMockReqRes({
+      method: 'POST',
+      headers: bearer(TOKEN_BOB),
+      body: {
+        collection: 'wordPool/concept1/translations',
+        id: 'en-US',
+        data: { translation: 'cat' },
+      },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(201);
+  });
+
+  it('lets a different signed-in user query the shared examExercises pool', async () => {
+    __testUtils.seedDoc('examExercises', 'ex1', { status: 'ready', type: 'listening', createdBy: 'alice' });
+    const { req, res } = createMockReqRes({
+      method: 'GET',
+      headers: bearer(TOKEN_BOB),
+      query: { collection: 'examExercises', filters: JSON.stringify([{ field: 'status', op: '==', value: 'ready' }]) },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.documents.length).toBe(1);
+  });
+
+  it('an unauthenticated caller is still blocked from the pool (policy loosens ownership, not authentication)', async () => {
+    __testUtils.seedDoc('wordPool', 'concept1', { word: 'gato', status: 'ready', createdBy: 'alice' });
+    const { req, res } = createMockReqRes({
+      method: 'GET',
+      query: { collection: 'wordPool', id: 'concept1' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(401);
+  });
+});
+
 describe('unexpected errors (finding 3.1)', () => {
   it('returns a generic message and does not leak internal error details', async () => {
     const spy = vi.spyOn(db, 'collection').mockImplementationOnce(() => {

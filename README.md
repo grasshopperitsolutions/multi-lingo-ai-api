@@ -51,7 +51,9 @@ There is no email/password auth in this API — sign-in is federated (Google tod
 
 Handles all Firestore CRUD operations via HTTP methods.
 
-**Authentication Required**: Yes, for every method and every collection.
+**Authentication Required**: Yes, for every method and every collection (a Firebase session is always required — this includes anonymous/guest sessions, which the frontend uses for pre-login reads).
+
+Beyond that base requirement, most collections outside `users` follow a strict "owner or admin" rule by default: a document is only readable/writable by whoever created it (`createdBy`/`userId`) or an admin. Collections that are actually shared — app config that guests need to read (`appConfig/config/locales`, `.../languages`, etc.) or community content pools that any signed-in user reads and contributes to (`wordPool`, `wordLinkGamePool`, `wordLadderGamePool`, `examExercises`) — instead follow an explicit policy declared in **[`lib/collection-policies.ts`](lib/collection-policies.ts)**. That's the file to edit when a new shared/config/pool collection needs anything other than the strict default.
 
 #### Create Document
 ```http

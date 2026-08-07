@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from './types';
 import { requireAdmin } from './require-admin';
+import { resolveCollectionPolicy } from './collection-policies';
 
 /**
  * Splits a slash-separated collection path into normalized segments.
@@ -103,20 +104,40 @@ export async function authorizeUsersDocAccess(
 }
 
 /**
- * Authorizes a write (update/delete) to a document in a collection with no
- * special-cased ownership model. Ownership is read off whichever of
- * `createdBy` (docs created via POST /api/firestore) or `userId` (docs
- * created via POST /api/storage, e.g. `files`) is present. Fails closed:
- * a document with neither field set is treated as unowned and only an
- * admin may write to it — previously this case fell through and let *any*
- * authenticated caller write to it. On denial, writes the 403 response.
+ * Authorizes a write (create-over-existing/update/delete) to a document in
+ * a collection outside the `users` special-case. Checks collection-policies.ts
+ * first — most shared/config/pool collections declare an explicit policy
+ * there ('authenticated' = any signed-in caller, no ownership check;
+ * 'admin' = admin only). Anything not listed falls back to the strict
+ * default: ownership is read off whichever of `createdBy` (docs created via
+ * POST /api/firestore) or `userId` (docs created via POST /api/storage,
+ * e.g. `files`) is present, and a document with neither field set is
+ * treated as unowned — only an admin may write to it. On denial, writes
+ * the 403 response.
  */
 export async function authorizeGenericDocWrite(
+  segments: string[],
   docData: Record<string, unknown> | undefined,
   uid: string,
   req: VercelRequest,
   res: VercelResponse
 ): Promise<boolean> {
+  const policy = resolveCollectionPolicy(segments);
+
+  if (policy.write === 'authenticated') {
+    return true;
+  }
+  if (policy.write === 'admin') {
+    return requireAdmin(uid, req, res);
+  }
+
+  // policy.write === 'owner-or-admin' (the default): a brand-new document
+  // (nothing existed to overwrite) is always creatable by any signed-in
+  // caller — ownership is only enforced once something exists to protect.
+  if (docData === undefined) {
+    return true;
+  }
+
   const ownerId = (docData?.createdBy ?? docData?.userId) as string | undefined;
   if (ownerId === uid) {
     return true;
@@ -125,22 +146,31 @@ export async function authorizeGenericDocWrite(
 }
 
 /**
- * Authorizes reading a document in a collection with no special-cased
- * ownership model. Unlike authorizeGenericDocWrite, a document with
- * neither `createdBy` nor `userId` set is treated as shared/public content
- * and allowed through — most non-`users` collections (word lists, exam
- * exercises, etc.) aren't ownership-scoped at all, and reads shouldn't fail
- * closed the way writes do. A document that *does* declare an owner is
- * restricted to that owner (or an admin) — this is what closes the IDOR
- * that let any authenticated caller read e.g. another user's `files` doc
- * (owner field `userId`) by guessing or enumerating its id.
+ * Authorizes reading a document in a collection outside the `users`
+ * special-case. Checks collection-policies.ts first ('public'/'authenticated'
+ * both skip the ownership check entirely — the only difference between them
+ * is documentation of intent, since verifyAuth already requires *some*
+ * verified session, anonymous or not). Anything not listed falls back to the
+ * strict default: a document with neither `createdBy` nor `userId` set is
+ * treated as shared/public content and allowed through (most non-`users`
+ * collections aren't ownership-scoped at all), but a document that *does*
+ * declare an owner is restricted to that owner (or an admin) — this is what
+ * closes the IDOR that let any authenticated caller read e.g. another
+ * user's `files` doc by guessing or enumerating its id.
  */
 export async function authorizeGenericDocRead(
+  segments: string[],
   docData: Record<string, unknown> | undefined,
   uid: string,
   req: VercelRequest,
   res: VercelResponse
 ): Promise<boolean> {
+  const policy = resolveCollectionPolicy(segments);
+
+  if (policy.read === 'public' || policy.read === 'authenticated') {
+    return true;
+  }
+
   const ownerId = (docData?.createdBy ?? docData?.userId) as string | undefined;
   if (ownerId === undefined || ownerId === uid) {
     return true;

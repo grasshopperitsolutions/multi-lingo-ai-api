@@ -104,11 +104,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const authResult = await authorizeUsersDocAccess(id, uid, req, res);
           if (!authResult.ok) return;
           sanitizedData = stripProtectedUserFields(data, authResult.allowTierChange);
-        } else if (existingData) {
-          // A document already exists at this id — only its owner (or an
-          // admin) may overwrite it via POST. Without this, POSTing a
-          // known/guessed id let anyone hijack any existing document.
-          const authorized = await authorizeGenericDocWrite(existingData, uid, req, res);
+        } else {
+          // Always consults the collection's write policy (e.g. admin-only
+          // for appConfig/config/categories, even for a brand-new doc).
+          // For the default (owner-or-admin) policy this is a no-op when
+          // creating a fresh document — only overwriting one that already
+          // exists is ownership-checked, closing the hole where POSTing a
+          // known/guessed id let anyone hijack an existing document.
+          const authorized = await authorizeGenericDocWrite(segments, existingData, uid, req, res);
           if (!authorized) return;
         }
 
@@ -314,7 +317,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // document declares (see authorizeGenericDocRead). Previously any
           // authenticated caller could read any document here regardless
           // of who it actually belonged to.
-          if (!(await authorizeGenericDocRead(doc.data(), uid, req, res))) return;
+          if (!(await authorizeGenericDocRead(segments, doc.data(), uid, req, res))) return;
         }
 
         logInfo('firestore_read', 'firestore', {
@@ -391,7 +394,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // (set by this endpoint's own POST) or userId (set by
           // /api/storage). A document with neither field fails closed —
           // previously it silently passed the check.
-          const authorized = await authorizeGenericDocWrite(doc.data(), uid, req, res);
+          const authorized = await authorizeGenericDocWrite(segments, doc.data(), uid, req, res);
           if (!authorized) return;
         }
 
@@ -471,7 +474,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const authResult = await authorizeUsersDocAccess(subOwner, uid, req, res);
           if (!authResult.ok) return;
         } else {
-          const authorized = await authorizeGenericDocWrite(doc.data(), uid, req, res);
+          const authorized = await authorizeGenericDocWrite(segments, doc.data(), uid, req, res);
           if (!authorized) return;
         }
 

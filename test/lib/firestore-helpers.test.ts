@@ -110,21 +110,25 @@ describe('authorizeUsersDocAccess', () => {
   });
 });
 
+// A collection path that matches no row in collection-policies.ts, so
+// these tests exercise the strict DEFAULT_POLICY (owner-or-admin) fallback.
+const UNLISTED_COLLECTION = ['files'];
+
 describe('authorizeGenericDocWrite', () => {
   it('allows the owner via createdBy', async () => {
     const { req, res } = createMockReqRes();
-    expect(await authorizeGenericDocWrite({ createdBy: 'uid1' }, 'uid1', req, res)).toBe(true);
+    expect(await authorizeGenericDocWrite(UNLISTED_COLLECTION, { createdBy: 'uid1' }, 'uid1', req, res)).toBe(true);
   });
 
   it('allows the owner via userId', async () => {
     const { req, res } = createMockReqRes();
-    expect(await authorizeGenericDocWrite({ userId: 'uid1' }, 'uid1', req, res)).toBe(true);
+    expect(await authorizeGenericDocWrite(UNLISTED_COLLECTION, { userId: 'uid1' }, 'uid1', req, res)).toBe(true);
   });
 
   it('denies a non-owner who is not admin', async () => {
     __testUtils.seedDoc('users', 'uid2', { subscriptionTier: 'explorer' });
     const { req, res } = createMockReqRes();
-    const authorized = await authorizeGenericDocWrite({ createdBy: 'uid1' }, 'uid2', req, res);
+    const authorized = await authorizeGenericDocWrite(UNLISTED_COLLECTION, { createdBy: 'uid1' }, 'uid2', req, res);
     expect(authorized).toBe(false);
     expect(res.statusCode).toBe(403);
   });
@@ -132,13 +136,45 @@ describe('authorizeGenericDocWrite', () => {
   it('fails closed when the document has no owner field at all', async () => {
     __testUtils.seedDoc('users', 'uid1', { subscriptionTier: 'explorer' });
     const { req, res } = createMockReqRes();
-    expect(await authorizeGenericDocWrite({ someField: 'x' }, 'uid1', req, res)).toBe(false);
+    expect(await authorizeGenericDocWrite(UNLISTED_COLLECTION, { someField: 'x' }, 'uid1', req, res)).toBe(false);
   });
 
   it('allows an admin to write to any document', async () => {
     __testUtils.seedDoc('users', 'admin1', { subscriptionTier: 'admin' });
     const { req, res } = createMockReqRes();
-    const authorized = await authorizeGenericDocWrite({ createdBy: 'someoneElse' }, 'admin1', req, res);
+    const authorized = await authorizeGenericDocWrite(UNLISTED_COLLECTION, { createdBy: 'someoneElse' }, 'admin1', req, res);
+    expect(authorized).toBe(true);
+  });
+
+  it("write:'authenticated' policy collections skip the ownership check entirely", async () => {
+    const { req, res } = createMockReqRes();
+    const authorized = await authorizeGenericDocWrite(['wordPool'], { createdBy: 'someoneElse' }, 'uid1', req, res);
+    expect(authorized).toBe(true);
+  });
+
+  it("write:'admin' policy collections require admin regardless of ownership", async () => {
+    __testUtils.seedDoc('users', 'uid1', { subscriptionTier: 'explorer' });
+    const { req, res } = createMockReqRes();
+    const authorized = await authorizeGenericDocWrite(
+      ['appConfig', 'config', 'categories'],
+      { createdBy: 'uid1' },
+      'uid1',
+      req,
+      res
+    );
+    expect(authorized).toBe(false);
+  });
+
+  it("write:'admin' policy collections allow an admin", async () => {
+    __testUtils.seedDoc('users', 'admin1', { subscriptionTier: 'admin' });
+    const { req, res } = createMockReqRes();
+    const authorized = await authorizeGenericDocWrite(
+      ['appConfig', 'config', 'categories'],
+      { createdBy: 'someoneElse' },
+      'admin1',
+      req,
+      res
+    );
     expect(authorized).toBe(true);
   });
 });
@@ -146,23 +182,23 @@ describe('authorizeGenericDocWrite', () => {
 describe('authorizeGenericDocRead', () => {
   it('allows the owner via createdBy', async () => {
     const { req, res } = createMockReqRes();
-    expect(await authorizeGenericDocRead({ createdBy: 'uid1' }, 'uid1', req, res)).toBe(true);
+    expect(await authorizeGenericDocRead(UNLISTED_COLLECTION, { createdBy: 'uid1' }, 'uid1', req, res)).toBe(true);
   });
 
   it('allows the owner via userId', async () => {
     const { req, res } = createMockReqRes();
-    expect(await authorizeGenericDocRead({ userId: 'uid1' }, 'uid1', req, res)).toBe(true);
+    expect(await authorizeGenericDocRead(UNLISTED_COLLECTION, { userId: 'uid1' }, 'uid1', req, res)).toBe(true);
   });
 
   it('treats a document with no owner field as public and allows it', async () => {
     const { req, res } = createMockReqRes();
-    expect(await authorizeGenericDocRead({ title: 'shared content' }, 'uid1', req, res)).toBe(true);
+    expect(await authorizeGenericDocRead(UNLISTED_COLLECTION, { title: 'shared content' }, 'uid1', req, res)).toBe(true);
   });
 
   it('denies a non-owner who is not admin when the document does declare an owner', async () => {
     __testUtils.seedDoc('users', 'uid2', { subscriptionTier: 'explorer' });
     const { req, res } = createMockReqRes();
-    const authorized = await authorizeGenericDocRead({ userId: 'uid1' }, 'uid2', req, res);
+    const authorized = await authorizeGenericDocRead(UNLISTED_COLLECTION, { userId: 'uid1' }, 'uid2', req, res);
     expect(authorized).toBe(false);
     expect(res.statusCode).toBe(403);
   });
@@ -170,7 +206,25 @@ describe('authorizeGenericDocRead', () => {
   it('allows an admin to read any owned document', async () => {
     __testUtils.seedDoc('users', 'admin1', { subscriptionTier: 'admin' });
     const { req, res } = createMockReqRes();
-    expect(await authorizeGenericDocRead({ userId: 'someoneElse' }, 'admin1', req, res)).toBe(true);
+    expect(await authorizeGenericDocRead(UNLISTED_COLLECTION, { userId: 'someoneElse' }, 'admin1', req, res)).toBe(true);
+  });
+
+  it("read:'public' policy collections are readable even if owned by someone else", async () => {
+    const { req, res } = createMockReqRes();
+    const authorized = await authorizeGenericDocRead(
+      ['appConfig', 'config', 'locales'],
+      { createdBy: 'someAdminUid' },
+      'uid1',
+      req,
+      res
+    );
+    expect(authorized).toBe(true);
+  });
+
+  it("read:'authenticated' policy collections (word pools) are readable by any signed-in caller", async () => {
+    const { req, res } = createMockReqRes();
+    const authorized = await authorizeGenericDocRead(['wordPool'], { createdBy: 'someoneElse' }, 'uid1', req, res);
+    expect(authorized).toBe(true);
   });
 });
 
