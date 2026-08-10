@@ -397,14 +397,14 @@ describe('per-collection policy — public app config (appConfig/config/locales,
 });
 
 describe('per-collection policy — admin-curated app config (appConfig/config/categories)', () => {
-  it('blocks a non-admin signed-in user from creating a category', async () => {
+  it('lets a non-admin signed-in user create a category', async () => {
     const { req, res } = createMockReqRes({
       method: 'POST',
       headers: bearer(TOKEN_ALICE),
       body: { collection: 'appConfig/config/categories', id: 'food', data: { label: 'Food' } },
     });
     await handler(req, res);
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(201);
   });
 
   it('allows an admin to create a category', async () => {

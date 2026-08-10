@@ -156,7 +156,7 @@ describe('authorizeGenericDocWrite', () => {
     __testUtils.seedDoc('users', 'uid1', { subscriptionTier: 'explorer' });
     const { req, res } = createMockReqRes();
     const authorized = await authorizeGenericDocWrite(
-      ['appConfig', 'config', 'categories'],
+      ['appConfig', 'config', 'authProviders'],
       { createdBy: 'uid1' },
       'uid1',
       req,
@@ -169,7 +169,7 @@ describe('authorizeGenericDocWrite', () => {
     __testUtils.seedDoc('users', 'admin1', { subscriptionTier: 'admin' });
     const { req, res } = createMockReqRes();
     const authorized = await authorizeGenericDocWrite(
-      ['appConfig', 'config', 'categories'],
+      ['appConfig', 'config', 'authProviders'],
       { createdBy: 'someoneElse' },
       'admin1',
       req,

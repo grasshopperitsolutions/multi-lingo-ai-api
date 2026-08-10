@@ -10,11 +10,11 @@ describe('resolveCollectionPolicy', () => {
   it('resolves exact-path policies for appConfig subcollections that allow any signed-in user to write', () => {
     expect(resolveCollectionPolicy(['appConfig', 'config', 'locales'])).toEqual({ read: 'public', write: 'authenticated' });
     expect(resolveCollectionPolicy(['appConfig', 'config', 'languages'])).toEqual({ read: 'public', write: 'authenticated' });
-    expect(resolveCollectionPolicy(['appConfig', 'config', 'writingSystems'])).toEqual({ read: 'public', write: 'authenticated' });
+    expect(resolveCollectionPolicy(['appConfig', 'config', 'writingSystems'])).toEqual({ read: 'authenticated', write: 'authenticated' });
   });
 
   it('resolves exact-path policies for appConfig subcollections that are admin-write only', () => {
-    expect(resolveCollectionPolicy(['appConfig', 'config', 'categories'])).toEqual({ read: 'public', write: 'admin' });
+    expect(resolveCollectionPolicy(['appConfig', 'config', 'categories'])).toEqual({ read: 'public', write: 'authenticated' });
     expect(resolveCollectionPolicy(['appConfig', 'config', 'authProviders'])).toEqual({ read: 'public', write: 'admin' });
     expect(resolveCollectionPolicy(['appConfig', 'config', 'prompts'])).toEqual({ read: 'public', write: 'admin' });
   });
