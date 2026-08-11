@@ -68,6 +68,15 @@ export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
   wordLadderGamePool: { read: 'authenticated', write: 'authenticated' },
   examExercises: { read: 'authenticated', write: 'authenticated' },
   examImages: { read: 'authenticated', write: 'authenticated' },
+
+  // Grammar library and story pools. Same cache-first contract as the pools
+  // above: content is generated once by whoever hits an empty pool and is
+  // then read by everyone. `grammarTopics`/`stories` carry a
+  // `content/{locale}` subcollection, which the prefix match covers.
+  grammarTopics: { read: 'authenticated', write: 'authenticated' },
+  grammarTips: { read: 'authenticated', write: 'authenticated' },
+  grammarExercises: { read: 'authenticated', write: 'authenticated' },
+  stories: { read: 'authenticated', write: 'authenticated' },
 };
 
 /** Resolves the policy for an already-normalized collection path. */
