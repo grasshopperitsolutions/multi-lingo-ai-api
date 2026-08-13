@@ -50,7 +50,7 @@ export async function askGemini(
     return _askGeminiTts(prompt, params);
   }
 
-  const model = params.model ?? 'gemini-3.5-flash';
+  const model = params.model ?? 'gemini-3.5-flash-lite';
 
   // Separate system messages from conversation turns
   const systemMessages = messages?.filter((m) => m.role === 'system') ?? [];

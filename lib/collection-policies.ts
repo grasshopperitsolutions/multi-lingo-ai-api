@@ -77,6 +77,7 @@ export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
   grammarTips: { read: 'authenticated', write: 'authenticated' },
   grammarExercises: { read: 'authenticated', write: 'authenticated' },
   stories: { read: 'authenticated', write: 'authenticated' },
+  historyFacts: { read: 'authenticated', write: 'authenticated' },
 };
 
 /** Resolves the policy for an already-normalized collection path. */
