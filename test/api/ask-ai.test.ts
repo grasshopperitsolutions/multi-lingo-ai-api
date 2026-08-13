@@ -9,7 +9,7 @@ vi.mock('../../lib/providers/perplexity', () => ({
   askPerplexity: vi.fn(async () => ({ text: 'perplexity-response', provider: 'perplexity', model: 'sonar' })),
 }));
 vi.mock('../../lib/providers/gemini', () => ({
-  askGemini: vi.fn(async () => ({ text: 'gemini-response', provider: 'gemini', model: 'gemini-3.5-flash' })),
+  askGemini: vi.fn(async () => ({ text: 'gemini-response', provider: 'gemini', model: 'gemini-3.5-flash-lite' })),
 }));
 
 import { __testUtils } from '../helpers/mockFirebaseAdmin';

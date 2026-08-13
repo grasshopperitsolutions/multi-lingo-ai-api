@@ -72,7 +72,7 @@ export type GeminiThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
  */
 export interface GeminiParams {
   provider: 'gemini';
-  model?: string;              // default: 'gemini-3.5-flash'
+  model?: string;              // default: 'gemini-3.5-flash-lite'
   temperature?: number;        // 0–2, default: 0.8
   maxOutputTokens?: number;    // default: 1024
   topP?: number;               // 0–1, default: 0.9

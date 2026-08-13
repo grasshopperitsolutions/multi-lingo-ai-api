@@ -29,7 +29,7 @@ describe('askGemini — text generation', () => {
   it('wraps a bare prompt with default config', async () => {
     generateContentMock.mockResolvedValueOnce(textResponse('hello back'));
     const result = await askGemini('hello', { provider: 'gemini' });
-    expect(result).toEqual({ text: 'hello back', provider: 'gemini', model: 'gemini-3.5-flash' });
+    expect(result).toEqual({ text: 'hello back', provider: 'gemini', model: 'gemini-3.5-flash-lite' });
 
     const call = generateContentMock.mock.calls[0][0];
     expect(call.contents).toEqual([{ role: 'user', parts: [{ text: 'hello' }] }]);
