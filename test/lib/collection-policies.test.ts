@@ -19,6 +19,20 @@ describe('resolveCollectionPolicy', () => {
     expect(resolveCollectionPolicy(['appConfig', 'config', 'prompts'])).toEqual({ read: 'public', write: 'admin' });
   });
 
+  it('lets guests read the feature registry and tier config, but only admins write them', () => {
+    // The public pricing page renders from these, and the frontend treats both
+    // as required config — a guest that can't read them gets /app-unavailable.
+    expect(resolveCollectionPolicy(['appConfig', 'config', 'features'])).toEqual({ read: 'public', write: 'admin' });
+    expect(resolveCollectionPolicy(['appConfig', 'config', 'tiersConfig'])).toEqual({ read: 'public', write: 'admin' });
+  });
+
+  it('does not leave the feature registry or tier config on the default policy', () => {
+    // Regression guard: under owner-or-admin, "a brand-new document is always
+    // creatable" would let any signed-in caller invent feature keys or tiers.
+    expect(resolveCollectionPolicy(['appConfig', 'config', 'features'])).not.toEqual(DEFAULT_POLICY);
+    expect(resolveCollectionPolicy(['appConfig', 'config', 'tiersConfig'])).not.toEqual(DEFAULT_POLICY);
+  });
+
   it('falls back to the default for an appConfig subcollection with no explicit row', () => {
     expect(resolveCollectionPolicy(['appConfig', 'config', 'somethingNew'])).toEqual(DEFAULT_POLICY);
   });

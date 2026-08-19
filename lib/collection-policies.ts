@@ -53,6 +53,17 @@ export const EXACT_PATH_POLICIES: Record<string, CollectionPolicy> = {
   'appConfig/config/categories': { read: 'public', write: 'authenticated' }, // users should be able to add new categories, but only admins can remove them
   'appConfig/config/authProviders': { read: 'public', write: 'admin' },
   'appConfig/config/prompts': { read: 'public', write: 'admin' },
+
+  // Feature registry and per-tier limits/grants. Read by guests: the public
+  // pricing page renders the plan comparison from these, and the frontend
+  // treats them as required config (it routes to /app-unavailable if either
+  // fails to load), so a guest hitting the landing page must be able to fetch
+  // them. Admin-write only — without an explicit row these fell back to
+  // owner-or-admin, whose "a brand-new document is always creatable" rule
+  // would let any signed-in caller, including an anonymous guest, invent
+  // arbitrary feature keys or tier documents.
+  'appConfig/config/features': { read: 'public', write: 'admin' },
+  'appConfig/config/tiersConfig': { read: 'public', write: 'admin' },
 };
 
 /**
