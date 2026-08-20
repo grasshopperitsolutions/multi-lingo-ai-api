@@ -138,7 +138,11 @@ export async function askGemini(
       logWarn('gemini_empty_response', 'ask-ai', { model, finishReason });
     }
 
-    return { text, provider: 'gemini', model };
+    // `finishReason` is passed through so callers can tell a truncated
+    // response ('MAX_TOKENS') from a complete one. Without it, a reply cut off
+    // mid-JSON is indistinguishable from a malformed one, and the caller can't
+    // know whether raising maxOutputTokens would help.
+    return { text, provider: 'gemini', model, finishReason };
   } catch (err: any) {
     throw _mapGeminiError(err, model);
   }

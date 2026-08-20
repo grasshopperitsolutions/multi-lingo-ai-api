@@ -153,6 +153,12 @@ export interface AskAIResponse {
   audioData?: string;
   /** MIME type of the audio data, e.g. 'audio/wav'. Present only for TTS responses. */
   mimeType?: string;
+  /**
+   * Why generation stopped, e.g. 'STOP' (complete) or 'MAX_TOKENS' (truncated).
+   * Lets a caller tell a reply that was cut off mid-output from one that is
+   * merely malformed — the two need different remedies.
+   */
+  finishReason?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

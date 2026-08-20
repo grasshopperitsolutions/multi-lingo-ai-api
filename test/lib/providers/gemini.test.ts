@@ -29,7 +29,7 @@ describe('askGemini — text generation', () => {
   it('wraps a bare prompt with default config', async () => {
     generateContentMock.mockResolvedValueOnce(textResponse('hello back'));
     const result = await askGemini('hello', { provider: 'gemini' });
-    expect(result).toEqual({ text: 'hello back', provider: 'gemini', model: 'gemini-3.5-flash-lite' });
+    expect(result).toEqual({ text: 'hello back', provider: 'gemini', model: 'gemini-3.5-flash-lite', finishReason: 'STOP' });
 
     const call = generateContentMock.mock.calls[0][0];
     expect(call.contents).toEqual([{ role: 'user', parts: [{ text: 'hello' }] }]);
@@ -73,6 +73,13 @@ describe('askGemini — text generation', () => {
     await askGemini('hi', { provider: 'gemini', thinkingLevel: 'high', includeThoughts: true });
     const call = generateContentMock.mock.calls[0][0];
     expect(call.config.thinkingConfig).toEqual({ thinkingLevel: 'HIGH', includeThoughts: true });
+  });
+
+  it('passes finishReason through so callers can detect a truncated reply', async () => {
+    generateContentMock.mockResolvedValueOnce(textResponse('{"a": "partial', 'MAX_TOKENS'));
+    const result = await askGemini('hi', { provider: 'gemini' });
+    expect(result.finishReason).toBe('MAX_TOKENS');
+    expect(result.text).toBe('{"a": "partial');
   });
 
   it('returns an empty string when finishReason is not STOP', async () => {
