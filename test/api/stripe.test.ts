@@ -63,6 +63,22 @@ describe('POST /api/stripe — checkout', () => {
     expect(stripe.customers.create).not.toHaveBeenCalled();
   });
 
+  it('sends no free trial for any plan — the free Explorer tier is the trial', async () => {
+    for (const plan of ['voyager', 'maestro']) {
+      const { req, res } = createMockReqRes({
+        method: 'POST',
+        headers: bearer(TOKEN_ALICE),
+        body: { action: 'checkout', plan, interval: 'monthly' },
+      });
+      await handler(req, res);
+      expect(res.statusCode).toBe(200);
+
+      const args = (stripe.checkout.sessions.create as any).mock.calls.at(-1)[0];
+      expect(args.subscription_data).not.toHaveProperty('trial_period_days');
+      expect(args.subscription_data).not.toHaveProperty('trial_settings');
+    }
+  });
+
   it('rejects checkout when the stored stripeCustomerId does not actually belong to this uid (finding 1.8)', async () => {
     stripeUtils.seedCustomer('cus_victim', { metadata: { firebaseUid: 'someone-else' } });
     fbUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer', stripeCustomerId: 'cus_victim' });

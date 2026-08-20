@@ -38,10 +38,17 @@ const PRICE_ID_MAP: Record<string, Record<string, string | undefined>> = {
   },
 };
 
-/** Free trial length per plan, in days. Omitted entirely (no trial) for plans not listed here. */
-const TRIAL_DAYS_BY_PLAN: Record<string, number> = {
-  maestro: 7,
-};
+/**
+ * Free trial length per plan, in days. Omitted entirely (no trial) for plans
+ * not listed here — which is currently every plan: the free Explorer tier is
+ * the trial. Add a row back here to re-enable one; the checkout session below
+ * already handles both cases.
+ *
+ * NOTE: this only controls trials for *new* checkouts. A trial configured on
+ * the Stripe Price itself would still apply, and subscriptions already in a
+ * trial keep running until their existing trial_end.
+ */
+const TRIAL_DAYS_BY_PLAN: Record<string, number> = {};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
