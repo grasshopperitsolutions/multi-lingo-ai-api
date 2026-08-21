@@ -1,6 +1,15 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This is the canonical project brief for Claude Code and other agents working in this repository. Read it before answering questions, proposing changes, or editing code. `AGENTS.md` and `.github/copilot-instructions.md` provide short routing layers; they do not override this file.
+
+## Efficient agent workflow
+
+1. Identify the owning endpoint, helper, policy, provider, or test before reading broadly.
+2. Read that implementation and its nearest mirrored test; inspect the sibling frontend only for API contract changes.
+3. Make the smallest compatible edit that preserves the security invariants below.
+4. Run the narrowest matching Vitest file, then `npm run typecheck`; use the full suite for cross-cutting changes.
+
+Avoid `coverage/`, `node_modules/`, generated output, and unrelated endpoints unless the task requires them. The implementation and tests are the source of truth, not coverage reports or README examples.
 
 ## What this is
 
@@ -37,7 +46,7 @@ There is no lint script configured.
 
 - Every request (including anonymous/guest Firebase sessions) must pass `lib/verify-auth.ts` (verifies the Firebase ID token, returns the uid, or sends 401).
 - The `users` collection is special-cased: a caller may always read/write their own `users/{uid}` doc (and anything nested under it); touching another uid's doc/subcollection requires admin (`lib/require-admin.ts`, checks `subscriptionTier === 'admin'` on the caller's own profile).
-- Every other collection defaults to `owner-or-admin` (ownership read off the document's own `createdBy`/`userId` field — a document with neither fails closed) unless `lib/collection-policies.ts` declares an explicit `EXACT_PATH_POLICIES` or `PREFIX_POLICIES` entry (`public`/`authenticated`/`admin` read or write). That file is where a new shared/config/pool collection's access rules get added — not in `api/firestore.ts` itself.
+- Every other collection defaults to `owner-or-admin` (writes require the document's own `createdBy`/`userId` owner or an admin; reads allow unowned documents but restrict documents owned by another user) unless `lib/collection-policies.ts` declares an explicit `EXACT_PATH_POLICIES` or `PREFIX_POLICIES` entry (`public`/`authenticated`/`admin` read or write). That file is where a new shared/config/pool collection's access rules get added — not in `api/firestore.ts` itself.
 - Writing to `users` strips protected fields server-side (`stripProtectedUserFields` in `lib/firestore-helpers.ts`) — `subscriptionTier`, Stripe IDs/status, `aiCallsToday`/`aiCallsDate` can only be set by the Stripe webhook (`api/stripe.ts`) or the ask-ai quota counter (`api/ask-ai.ts`), never by a self- or admin-edit through the generic endpoint.
 - Deleting a `users` doc through `api/firestore.ts` is rejected outright; account deletion must go through `DELETE /api/auth`, which cascades the Stripe subscription, Storage files, and Auth record (`lib/delete-user-account.ts`).
 
