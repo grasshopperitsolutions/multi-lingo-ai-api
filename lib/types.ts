@@ -113,7 +113,7 @@ export interface GeminiParams {
    * When true, switches to audio-output mode using responseModalities: ['AUDIO'].
    * The prompt is treated as the text to synthesise, not a text-generation input.
    * Returns audioData (Base64) and mimeType instead of text.
-   * Use a TTS-capable model, e.g. 'gemini-2.5-flash-preview-tts'.
+   * Use a TTS-capable model, e.g. 'gemini-3.1-flash-tts-preview'.
    */
   tts?: boolean;
   /**

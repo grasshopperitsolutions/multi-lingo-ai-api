@@ -4,9 +4,9 @@ import { logInfo, logWarn } from '../logger';
 
 const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
 
-// Default TTS model — gemini-2.5-flash-preview-tts is the current stable preview.
+// Default TTS model — gemini-3.1-flash-tts-preview is the current Gemini 3.1 TTS preview.
 // gemini-3.5-flash-preview-tts does NOT exist and should never be used.
-const DEFAULT_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
+const DEFAULT_TTS_MODEL = 'gemini-3.1-flash-tts-preview';
 const DEFAULT_TTS_VOICE = 'Sulafat';
 
 /**
@@ -30,7 +30,7 @@ const DEFAULT_TTS_VOICE = 'Sulafat';
  *
  * TTS mode (params.tts === true):
  *  - Uses responseModalities: ['AUDIO'] with speechConfig.
- *  - Default model: gemini-2.5-flash-preview-tts.
+ *  - Default model: gemini-3.1-flash-tts-preview.
  *  - Default voice: Sulafat.
  *  - Returns audioData (Base64) and mimeType instead of text.
  *
