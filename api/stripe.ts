@@ -6,6 +6,14 @@ import { verifyAuth } from '../lib/verify-auth';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { stripe } from '../lib/stripe';
 import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
+import { sendEmailSafe } from '../lib/email';
+import { getEmailCopy } from '../lib/email-copy';
+import {
+  subscriptionActivatedEmail,
+  subscriptionCancelScheduledEmail,
+  subscriptionEndedEmail,
+  paymentFailedEmail,
+} from '../lib/email-templates';
 import type { VercelRequest, VercelResponse, SubscriptionTier, StripeCheckoutRequest } from '../lib/types';
 
 // Vercel would otherwise auto-parse the JSON body before this handler runs,
@@ -78,6 +86,27 @@ async function uidFromCustomerId(customerId: string): Promise<string | null> {
     .get();
   if (snapshot.empty) return null;
   return snapshot.docs[0].id;
+}
+
+/**
+ * The user-document fields every subscription email needs, plus the document
+ * itself so a case can compare against the pre-update state. Returns null
+ * when there is no address to write to.
+ */
+async function recipientFor(uid: string) {
+  const snap = await db.collection('users').doc(uid).get();
+  const data = snap.data();
+  if (!data?.email) return null;
+  return { email: data.email as string, name: data.displayName as string | undefined, locale: data.interfaceLang as string | undefined, before: data };
+}
+
+/** Formats a Stripe unix timestamp for use in email copy, in the recipient's locale. */
+function formatPeriodEnd(unixSeconds: number | null | undefined, locale?: string): string {
+  if (!unixSeconds) return '';
+  return new Date(unixSeconds * 1000).toLocaleDateString(
+    locale && locale !== 'en' ? locale : 'en-US',
+    { year: 'numeric', month: 'long', day: 'numeric' }
+  );
 }
 
 /**
@@ -316,6 +345,29 @@ async function handleWebhook(
     eventType: event.type, eventId: event.id, durationMs: elapsed(),
   });
 
+  // Idempotency. Stripe retries any delivery it doesn't get a 2xx for, and
+  // these handlers now send email — without this a retry re-sends it.
+  // create() fails if the document exists, so the check and the claim are a
+  // single atomic operation; a plain get()-then-set() would race two
+  // concurrent retries.
+  try {
+    await db.collection('stripeEvents').doc(event.id).create({
+      type: event.type,
+      receivedAt: FieldValue.serverTimestamp(),
+    });
+  } catch (err: any) {
+    // Only ALREADY_EXISTS (gRPC code 6) means "seen this one". Anything
+    // else — a Firestore outage, a permissions problem — must propagate to
+    // the caller's 500 so Stripe retries, rather than being mistaken for a
+    // duplicate and silently dropping the event.
+    if (err?.code !== 6) throw err;
+
+    logInfo('stripe_webhook_duplicate', 'stripe', {
+      eventType: event.type, eventId: event.id, durationMs: elapsed(),
+    });
+    return successResponse(res, { received: true, duplicate: true });
+  }
+
   switch (event.type) {
 
     case 'checkout.session.completed': {
@@ -344,6 +396,16 @@ async function handleWebhook(
       }, { merge: true });
 
       logInfo('stripe_webhook_activated', 'stripe', { uid, tier, subscriptionId, durationMs: elapsed() });
+
+      const recipient = await recipientFor(uid);
+      if (recipient) {
+        await sendEmailSafe(
+          subscriptionActivatedEmail(
+            await getEmailCopy(recipient.locale), recipient.email, recipient.name, tier
+          ),
+          { template: 'subscription_activated', uid, category: 'transactional' }
+        );
+      }
       break;
     }
 
@@ -358,6 +420,12 @@ async function handleWebhook(
         break;
       }
 
+      // Read before the write: this event fires on every renewal and every
+      // plan change, so the only way to tell a newly-scheduled cancellation
+      // from a routine update is to compare with the stored value.
+      const recipient = await recipientFor(uid);
+      const wasCancelScheduled = recipient?.before.cancelAtPeriodEnd === true;
+
       await db.collection('users').doc(uid).set({
         subscriptionTier: tier,
         stripeSubscriptionId: subscription.id,
@@ -371,6 +439,19 @@ async function handleWebhook(
       }, { merge: true });
 
       logInfo('stripe_webhook_updated', 'stripe', { uid, tier, status: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end, durationMs: elapsed() });
+
+      // Only on the transition into "cancellation scheduled". Emailing on
+      // every fire of this event would mail every subscriber every month.
+      if (recipient && subscription.cancel_at_period_end && !wasCancelScheduled) {
+        const copy = await getEmailCopy(recipient.locale);
+        await sendEmailSafe(
+          subscriptionCancelScheduledEmail(
+            copy, recipient.email, recipient.name, tier,
+            formatPeriodEnd(subscription.current_period_end, recipient.locale)
+          ),
+          { template: 'subscription_cancel_scheduled', uid, category: 'transactional' }
+        );
+      }
       break;
     }
 
@@ -389,6 +470,14 @@ async function handleWebhook(
       }, { merge: true });
 
       logInfo('stripe_webhook_canceled', 'stripe', { uid, durationMs: elapsed() });
+
+      const recipient = await recipientFor(uid);
+      if (recipient) {
+        await sendEmailSafe(
+          subscriptionEndedEmail(await getEmailCopy(recipient.locale), recipient.email, recipient.name),
+          { template: 'subscription_ended', uid, category: 'transactional' }
+        );
+      }
       break;
     }
 
@@ -403,6 +492,17 @@ async function handleWebhook(
       }, { merge: true });
 
       logWarn('stripe_webhook_payment_failed', 'stripe', { uid, durationMs: elapsed() });
+
+      // NOTE: Stripe can send its own dunning mail for this. Check
+      // Dashboard -> Settings -> Customer emails before enabling in prod,
+      // or subscribers get two notices for one failed charge.
+      const recipient = await recipientFor(uid);
+      if (recipient) {
+        await sendEmailSafe(
+          paymentFailedEmail(await getEmailCopy(recipient.locale), recipient.email, recipient.name),
+          { template: 'payment_failed', uid, category: 'transactional' }
+        );
+      }
       break;
     }
 

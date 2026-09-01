@@ -25,6 +25,11 @@ if (!admin.apps.length) {
 export const auth = admin.auth();
 export const db = admin.firestore();
 export const storage = admin.storage();
+/**
+ * Lazy: admin.messaging() does credential work on first call, and every
+ * handler imports this module — only the push path should pay for it.
+ */
+export const getMessaging = () => admin.messaging();
 export const FieldValue = admin.firestore.FieldValue;
 
 export default app;

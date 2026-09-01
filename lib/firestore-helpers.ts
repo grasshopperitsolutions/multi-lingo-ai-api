@@ -170,6 +170,9 @@ export async function authorizeGenericDocRead(
   if (policy.read === 'public' || policy.read === 'authenticated') {
     return true;
   }
+  if (policy.read === 'admin') {
+    return requireAdmin(uid, req, res);
+  }
 
   const ownerId = (docData?.createdBy ?? docData?.userId) as string | undefined;
   if (ownerId === undefined || ownerId === uid) {

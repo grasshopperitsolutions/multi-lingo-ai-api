@@ -14,6 +14,8 @@ import {
   authorizeGenericDocRead,
   authorizeUsersScopedRead,
 } from '../lib/firestore-helpers';
+import { resolveCollectionPolicy } from '../lib/collection-policies';
+import { requireAdmin } from '../lib/require-admin';
 
 /**
  * Resolves a slash-separated collection path to a Firestore CollectionReference.
@@ -177,6 +179,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // Same restriction applies to querying someone else's
           // users/{uid}/... sub-collection.
           if (!(await authorizeUsersScopedRead(segments, undefined, uid, req, res))) return;
+
+          // A collection query returns whole documents with no per-document
+          // ownership check applied below, so a collection whose policy says
+          // 'admin' has to be gated here — the single-document path's
+          // authorizeGenericDocRead never runs for a query.
+          if (resolveCollectionPolicy(segments).read === 'admin') {
+            if (!(await requireAdmin(uid, req, res))) return;
+          }
 
           let filters: Array<{ field: string; op: string; value: unknown }>;
 

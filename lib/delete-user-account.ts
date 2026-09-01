@@ -1,6 +1,9 @@
 import { auth, db, storage } from './firebase-admin';
 import { stripe } from './stripe';
 import { logWarn } from './logger';
+import { sendEmailSafe } from './email';
+import { getEmailCopy } from './email-copy';
+import { accountDeletedEmail } from './email-templates';
 
 /**
  * Recursively deletes all sub-collections under a Firestore document.
@@ -45,6 +48,23 @@ export async function deleteUserAccount(uid: string): Promise<void> {
         reason: stripeErr?.message,
       });
     }
+  }
+
+  // 1b. Confirm the deletion by email while the address is still readable.
+  //     Everything below this point destroys the data it would be read
+  //     from, and step 5 destroys the Auth record entirely — so this has to
+  //     happen here or not at all. Transactional: a user cannot opt out of
+  //     being told their account was destroyed.
+  const userData = userDoc.data();
+  if (userData?.email) {
+    await sendEmailSafe(
+      accountDeletedEmail(
+        await getEmailCopy(userData.interfaceLang),
+        userData.email,
+        userData.displayName
+      ),
+      { template: 'account_deleted', uid, category: 'transactional' }
+    );
   }
 
   // 2. Delete Firestore user document + sub-collections

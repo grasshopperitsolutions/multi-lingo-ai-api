@@ -10,3 +10,9 @@ process.env.STRIPE_PRICE_VOYAGER_MONTHLY ??= 'price_voyager_monthly';
 process.env.STRIPE_PRICE_VOYAGER_YEARLY ??= 'price_voyager_yearly';
 process.env.STRIPE_PRICE_MAESTRO_MONTHLY ??= 'price_maestro_monthly';
 process.env.STRIPE_PRICE_MAESTRO_YEARLY ??= 'price_maestro_yearly';
+
+// Belt and braces: a developer with a real RESEND_API_KEY exported in their
+// shell must not send actual mail by running the test suite. Tests that
+// exercise the provider path unset this themselves.
+process.env.EMAIL_ENABLED ??= 'false';
+process.env.PUSH_ENABLED ??= 'false';

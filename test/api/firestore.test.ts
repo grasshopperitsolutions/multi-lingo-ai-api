@@ -512,3 +512,53 @@ describe('method not allowed', () => {
     expect(res.statusCode).toBe(405);
   });
 });
+
+describe("server-only collections (contact submissions, Stripe events)", () => {
+  // These hold names, email addresses, phone numbers and message bodies.
+  // The collection-query path applies no per-document ownership check, so
+  // without an explicit 'admin' read policy the default would have handed
+  // every submission to any signed-in caller — anonymous guests included.
+  it.each(["contactSubmissions", "contactRateLimits", "stripeEvents"])(
+    "refuses a non-admin collection query on %s",
+    async (collection) => {
+      __testUtils.seedDoc(collection, "doc1", { uid: "alice", message: "private" });
+
+      const { req, res } = createMockReqRes({
+        method: "GET",
+        headers: bearer(TOKEN_ALICE),
+        query: { collection, filters: "[]" },
+      });
+      await handler(req, res);
+
+      expect(res.statusCode).toBe(403);
+      expect(res.body.data?.documents).toBeUndefined();
+    }
+  );
+
+  it("refuses a non-admin single-document read of a contact submission", async () => {
+    __testUtils.seedDoc("contactSubmissions", "doc1", { uid: "bob", message: "private" });
+
+    const { req, res } = createMockReqRes({
+      method: "GET",
+      headers: bearer(TOKEN_ALICE),
+      query: { collection: "contactSubmissions", id: "doc1" },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("lets an admin read contact submissions", async () => {
+    __testUtils.seedDoc("contactSubmissions", "doc1", { uid: "alice", message: "private" });
+
+    const { req, res } = createMockReqRes({
+      method: "GET",
+      headers: bearer(TOKEN_ADMIN),
+      query: { collection: "contactSubmissions", filters: "[]" },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.documents).toHaveLength(1);
+  });
+});

@@ -5,6 +5,9 @@ import { verifyAuth } from '../lib/verify-auth';
 import { requireAdmin } from '../lib/require-admin';
 import { deleteUserAccount } from '../lib/delete-user-account';
 import { logInfo, logError, startTimer } from '../lib/logger';
+import { sendEmailSafe } from '../lib/email';
+import { getEmailCopy, FALLBACK_LOCALE } from '../lib/email-copy';
+import { welcomeEmail } from '../lib/email-templates';
 import type { VercelRequest, VercelResponse } from '../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -122,6 +125,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return errorResponse(res, 'ID token is required', 400);
         }
 
+        // The browser's detected interface language, sent by the frontend's
+        // socialLogin(). Seeding it here is what lets a brand-new user's
+        // welcome email arrive in their own language — there is no profile
+        // to read it from yet. Validated because it is client-supplied and
+        // ends up as a Firestore document id in the locale lookup.
+        const detectedLang = typeof req.body.interfaceLang === 'string'
+          && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(req.body.interfaceLang)
+            ? req.body.interfaceLang
+            : FALLBACK_LOCALE;
+
+
         const decodedToken = await auth.verifyIdToken(idToken);
 
         let userRecord;
@@ -149,13 +163,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             photoURL: userRecord.photoURL || decodedToken.picture || null,
             emailVerified: userRecord.emailVerified,
             provider: action,
-            interfaceLang: 'en',
+            interfaceLang: detectedLang,
             theme: 'light',
             subscriptionTier: 'explorer',
             subscriptionStatus: null,
             createdAt: FieldValue.serverTimestamp(),
             updatedAt: FieldValue.serverTimestamp(),
           });
+
+          // First sign-in only. sendEmailSafe never throws, so a mail
+          // failure can't turn a successful sign-in into a 401 below.
+          // Sent in the language the browser reported, falling back through
+          // en-US to the bundled copy inside getEmailCopy.
+          if (userRecord.email) {
+            await sendEmailSafe(
+              welcomeEmail(
+                await getEmailCopy(detectedLang),
+                userRecord.email,
+                userRecord.displayName || decodedToken.name
+              ),
+              { template: 'welcome', uid: userRecord.uid, category: 'transactional' }
+            );
+          }
         } else {
           await userDocRef.update({
             displayName: userRecord.displayName || decodedToken.name || '',

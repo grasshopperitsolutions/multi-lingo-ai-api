@@ -9,6 +9,24 @@ import { vi } from 'vitest';
 
 const SERVER_TIMESTAMP = '__SERVER_TIMESTAMP__';
 
+/** Merges `patch` into `base`, resolving FieldValue sentinels (arrayRemove). */
+function applyFieldValues(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>
+): Record<string, unknown> {
+  const result = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    const remove = (value as any)?.__arrayRemove as unknown[] | undefined;
+    if (remove) {
+      const current = Array.isArray(result[key]) ? (result[key] as unknown[]) : [];
+      result[key] = current.filter((item) => !remove.includes(item));
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 // collectionPath (e.g. "users" or "users/uid1/notes") -> docId -> data
 let store = new Map<string, Map<string, Record<string, unknown>>>();
 let authUsers = new Map<string, any>();
@@ -91,17 +109,28 @@ function makeDocRef(path: string, id: string): any {
     async set(data: Record<string, unknown>, opts?: { merge?: boolean }) {
       const map = collectionMap(path);
       if (opts?.merge && map.has(id)) {
-        map.set(id, { ...map.get(id), ...data });
+        map.set(id, applyFieldValues(map.get(id)!, data));
       } else {
         map.set(id, { ...data });
       }
+    },
+    async create(data: Record<string, unknown>) {
+      const map = collectionMap(path);
+      if (map.has(id)) {
+        // Mirrors the real SDK: code 6 = ALREADY_EXISTS. The idempotency
+        // guard in api/stripe.ts keys off this exact code.
+        const err: any = new Error(`Document already exists: ${path}/${id}`);
+        err.code = 6;
+        throw err;
+      }
+      map.set(id, { ...data });
     },
     async update(data: Record<string, unknown>) {
       const map = collectionMap(path);
       if (!map.has(id)) {
         throw new Error(`No document to update: ${path}/${id}`);
       }
-      map.set(id, { ...map.get(id), ...data });
+      map.set(id, applyFieldValues(map.get(id)!, data));
     },
     async delete() {
       collectionMap(path).delete(id);
@@ -163,7 +192,17 @@ export const db: any = {
 
 export const FieldValue = {
   serverTimestamp: () => SERVER_TIMESTAMP,
+  /** Sentinel resolved by applyFieldValues() on set(merge)/update. */
+  arrayRemove: (...values: unknown[]) => ({ __arrayRemove: values }),
 };
+
+export const sendEachForMulticast = vi.fn(async ({ tokens }: { tokens: string[] }) => ({
+  successCount: tokens.length,
+  failureCount: 0,
+  responses: tokens.map(() => ({ success: true })),
+}));
+
+export const getMessaging = () => ({ sendEachForMulticast });
 
 export const auth: any = {
   verifyIdToken: vi.fn(async (token: string) => {
@@ -230,6 +269,7 @@ export const storage: any = {
 // ── Test utilities (not part of the real module's shape) ───────────────────
 export const __testUtils = {
   reset() {
+    sendEachForMulticast.mockClear();
     store = new Map();
     authUsers = new Map();
     authTokens = new Map();
