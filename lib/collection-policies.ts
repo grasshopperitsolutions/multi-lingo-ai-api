@@ -21,9 +21,18 @@
  *                                    genuinely private data (e.g. `files`)
  *                                    and is what every unlisted collection
  *                                    falls back to.
+ * - 'admin'         (read)       — admin only, on BOTH the single-document
+ *                                   and the collection-query read paths.
+ *                                   Needed because 'owner-or-admin' does not
+ *                                   actually protect a server-written
+ *                                   collection: a document with no
+ *                                   `createdBy`/`userId` field is treated as
+ *                                   shared content and allowed through, and
+ *                                   the query path applies no per-document
+ *                                   check at all.
  */
 
-export type ReadPolicy = 'public' | 'authenticated' | 'owner-or-admin';
+export type ReadPolicy = 'public' | 'authenticated' | 'owner-or-admin' | 'admin';
 export type WritePolicy = 'authenticated' | 'admin' | 'owner-or-admin';
 
 export interface CollectionPolicy {
@@ -72,6 +81,17 @@ export const EXACT_PATH_POLICIES: Record<string, CollectionPolicy> = {
  * `wordPool/{conceptId}/translations` inherits `wordPool`'s policy).
  */
 export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
+  // Server-written notification bookkeeping. Only api/email.ts and
+  // api/stripe.ts write these, through the Admin SDK, which bypasses this
+  // file entirely — so 'admin' here is purely about who may READ them back
+  // through the generic proxy. contactSubmissions in particular holds names,
+  // email addresses, phone numbers and message bodies; under the default
+  // policy the collection-query path would have handed the lot to any
+  // signed-in caller, anonymous guests included.
+  contactSubmissions: { read: 'admin', write: 'admin' },
+  contactRateLimits: { read: 'admin', write: 'admin' },
+  stripeEvents: { read: 'admin', write: 'admin' },
+
   // Shared, cache-first content pools: any signed-in user reads existing
   // entries and writes newly AI-generated ones back for everyone to reuse.
   wordPool: { read: 'authenticated', write: 'authenticated' },

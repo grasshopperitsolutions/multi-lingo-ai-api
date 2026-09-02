@@ -239,9 +239,17 @@ Required environment variables:
 - `FRONTEND_URL`: used for Stripe redirect URLs and as the default CORS-allowed origin
 - `OPENAI_API_KEY`, `GEMINI_API_KEY`, `PERPLEXITY_API_KEY`: AI provider credentials
 
+Required for email notifications (`/api/email`, plus the welcome / billing / account-deletion mail sent inline from `api/auth.ts`, `api/stripe.ts` and `lib/delete-user-account.ts`):
+- `RESEND_API_KEY`: Resend API key. The sending domain must be DNS-verified (SPF + DKIM) in the Resend dashboard first.
+- `EMAIL_FROM`: sender identity, e.g. `Multi Lingo AI <noreply@grasshoppersolutions.online>`
+- `CONTACT_INBOX`: where contact-form submissions are delivered
+
 Optional:
 - `ALLOWED_ORIGINS`: comma-separated list of allowed CORS origins — takes priority over `FRONTEND_URL` when set
 - `LIMITS_ENFORCED`: set to `false` to pause ask-ai daily quotas (enforced by default)
+- `EMAIL_REPLY_TO`: default Reply-To header when a template doesn't set its own
+- `EMAIL_ENABLED`: set to `false` to make every send a logged no-op (`email_skipped`). Useful for verifying trigger points before DNS is live. Anything other than the literal `false` leaves sending on.
+- `PUSH_ENABLED`: same kill switch for web push. Web push needs no key of its own — it goes through the existing Firebase credentials via FCM — but the frontend needs the matching `VITE_FIREBASE_VAPID_KEY` (Firebase Console → Project Settings → Cloud Messaging → Web Push certificates).
 
 ## Testing
 

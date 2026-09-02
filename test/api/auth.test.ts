@@ -175,3 +175,47 @@ describe('method handling', () => {
     expect(res.statusCode).toBe(405);
   });
 });
+
+describe('POST /api/auth — interfaceLang seeding', () => {
+  const signIn = (body: Record<string, unknown>) =>
+    createMockReqRes({ method: 'POST', body: { action: 'google', idToken: 'new-user-token', ...body } });
+
+  beforeEach(() => {
+    __testUtils.setValidToken('new-user-token', {
+      uid: 'newbie', email: 'newbie@test.local', name: 'Newbie',
+    });
+  });
+
+  it('seeds the locale the browser reported, so the welcome email matches it', async () => {
+    const { req, res } = signIn({ interfaceLang: 'pt-PT' });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(__testUtils.getDoc('users', 'newbie')?.interfaceLang).toBe('pt-PT');
+  });
+
+  it('defaults to en-US when the client sends nothing', async () => {
+    const { req, res } = signIn({});
+    await handler(req, res);
+    expect(__testUtils.getDoc('users', 'newbie')?.interfaceLang).toBe('en-US');
+  });
+
+  it.each(['../../etc', 'not a locale', 42, null, 'x'.repeat(50)])(
+    'falls back to en-US for the invalid value %p rather than storing it',
+    async (bad) => {
+      const { req, res } = signIn({ interfaceLang: bad });
+      await handler(req, res);
+      expect(__testUtils.getDoc('users', 'newbie')?.interfaceLang).toBe('en-US');
+    }
+  );
+
+  it('does not overwrite the language of a returning user', async () => {
+    __testUtils.seedDoc('users', 'newbie', { interfaceLang: 'fr-FR', subscriptionTier: 'explorer' });
+
+    const { req, res } = signIn({ interfaceLang: 'de-DE' });
+    await handler(req, res);
+
+    // Only the sign-in refresh fields are touched; their chosen language stands.
+    expect(__testUtils.getDoc('users', 'newbie')?.interfaceLang).toBe('fr-FR');
+  });
+});
