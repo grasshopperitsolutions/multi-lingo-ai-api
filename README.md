@@ -248,6 +248,7 @@ Optional:
 - `ALLOWED_ORIGINS`: comma-separated list of allowed CORS origins — takes priority over `FRONTEND_URL` when set
 - `LIMITS_ENFORCED`: set to `false` to pause ask-ai daily quotas (enforced by default)
 - `EMAIL_REPLY_TO`: default Reply-To header when a template doesn't set its own
+- `CRON_SECRET`: random string of 16+ characters. Vercel sends it as `Authorization: Bearer <value>` when it invokes the nightly report digest (`GET /api/email`, scheduled in `vercel.json`); without it set, that endpoint refuses every request. The account is on the Vercel Pro plan, so the schedule is honoured to the minute and a more frequent interval is possible if the digest ever needs one (Hobby would cap it at once a day and drift up to an hour).
 - `EMAIL_ENABLED`: set to `false` to make every send a logged no-op (`email_skipped`). Useful for verifying trigger points before DNS is live. Anything other than the literal `false` leaves sending on.
 - `PUSH_ENABLED`: same kill switch for web push. Web push needs no key of its own — it goes through the existing Firebase credentials via FCM — but the frontend needs the matching `VITE_FIREBASE_VAPID_KEY` (Firebase Console → Project Settings → Cloud Messaging → Web Push certificates).
 

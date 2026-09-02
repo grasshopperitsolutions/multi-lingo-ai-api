@@ -86,6 +86,9 @@ function makeQuery(path: string, filters: Array<{ field: string; op: string; val
       if (limitN !== undefined) docs = docs.slice(0, limitN);
       return {
         empty: docs.length === 0,
+        // Real QuerySnapshot exposes size; production code counts with it
+        // (the broadcast recipient cap and the report digest both do).
+        size: docs.length,
         docs: docs.map((d) => ({ id: d.id, data: () => ({ ...d.data }), ref: makeDocRef(path, d.id) })),
       };
     },

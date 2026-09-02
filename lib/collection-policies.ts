@@ -71,6 +71,14 @@ export const EXACT_PATH_POLICIES: Record<string, CollectionPolicy> = {
   // owner-or-admin, whose "a brand-new document is always creatable" rule
   // would let any signed-in caller, including an anonymous guest, invent
   // arbitrary feature keys or tier documents.
+  // User-filed reports (bugs, wrong translations, inappropriate content).
+  // Write is the strict default rather than 'authenticated' on purpose: under
+  // owner-or-admin a brand-new document is creatable by anyone signed in, so
+  // filing works, but an existing report can only be touched by its own
+  // reporter or an admin — 'authenticated' would let any user edit or delete
+  // somebody else's report. Read is admin-only: reports are moderation data.
+  'appConfig/config/reports': { read: 'admin', write: 'owner-or-admin' },
+
   'appConfig/config/features': { read: 'public', write: 'admin' },
   'appConfig/config/tiersConfig': { read: 'public', write: 'admin' },
 };
@@ -91,6 +99,7 @@ export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
   contactSubmissions: { read: 'admin', write: 'admin' },
   contactRateLimits: { read: 'admin', write: 'admin' },
   stripeEvents: { read: 'admin', write: 'admin' },
+  cronRuns: { read: 'admin', write: 'admin' },
 
   // Shared, cache-first content pools: any signed-in user reads existing
   // entries and writes newly AI-generated ones back for everyone to reuse.

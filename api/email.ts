@@ -8,8 +8,9 @@
  * handler that owns the event (sign-in, the Stripe webhook, account
  * deletion) and needs no endpoint at all.
  *
- *   action: 'contact'   — public contact form -> CONTACT_INBOX
- *   action: 'broadcast' — admin-authored announcement -> users (admin only)
+ *   POST action: 'contact'   — public contact form -> CONTACT_INBOX
+ *   POST action: 'broadcast' — admin-authored announcement -> users (admin only)
+ *   GET                      — nightly unread-report digest, Vercel cron only
  */
 
 import { handleCors, setCorsHeaders } from '../lib/cors';
@@ -21,7 +22,7 @@ import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
 import { sendEmailSafe, sendBatchSafe, type EmailMessage } from '../lib/email';
 import { sendPushToTokens, isPushSubscribed } from '../lib/push';
 import { getEmailCopy } from '../lib/email-copy';
-import { contactFormEmail, broadcastEmail } from '../lib/email-templates';
+import { contactFormEmail, broadcastEmail, reportDigestEmail } from '../lib/email-templates';
 import { normalizePrefs } from '../lib/notification-prefs';
 import type { VercelRequest, VercelResponse } from '../lib/types';
 
@@ -262,6 +263,81 @@ async function handleBroadcast(req: VercelRequest, res: VercelResponse, uid: str
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// nightly report digest (Vercel cron)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/email — how many user reports are still unread.
+ *
+ * Wired to a nightly cron in vercel.json. Vercel sends CRON_SECRET as a
+ * Bearer token on the invocation, which is the only thing authorizing this;
+ * there is no Firebase session on a cron request.
+ *
+ * Sends nothing when the count is zero — a nightly "you have 0 reports" mail
+ * trains you to ignore the ones that matter.
+ */
+async function handleReportDigest(req: VercelRequest, res: VercelResponse, elapsed: () => number) {
+  const secret = process.env.CRON_SECRET;
+  const authHeader = req.headers['authorization'];
+
+  if (!secret || authHeader !== `Bearer ${secret}`) {
+    logWarn('cron_unauthorized', 'email', { statusCode: 401, durationMs: elapsed() });
+    return errorResponse(res, 'Unauthorized', 401);
+  }
+
+  // Vercel cron delivery is best-effort and can fire the same run twice.
+  // A date stamp makes a duplicate invocation a no-op rather than a second
+  // identical email.
+  const today = new Date().toISOString().slice(0, 10);
+  const runRef = db.collection('cronRuns').doc('report_digest');
+  const lastRun = (await runRef.get()).data()?.lastRunDate;
+
+  if (lastRun === today) {
+    logInfo('cron_already_ran', 'email', { job: 'report_digest', today, durationMs: elapsed() });
+    return successResponse(res, { skipped: 'already ran today' });
+  }
+
+  const snapshot = await db
+    .collection('appConfig').doc('config')
+    .collection('reports')
+    .where('read', '==', false)
+    .get();
+
+  const unreadCount = snapshot.size;
+
+  // Claim the day even when nothing is sent, so a retry doesn't re-query.
+  await runRef.set({ lastRunDate: today, unreadCount, ranAt: FieldValue.serverTimestamp() }, { merge: true });
+
+  if (unreadCount === 0) {
+    logInfo('report_digest_skipped', 'email', { reason: 'no unread reports', durationMs: elapsed() });
+    return successResponse(res, { unreadCount, sent: false });
+  }
+
+  const inbox = process.env.CONTACT_INBOX;
+  if (!inbox) {
+    logError('contact_inbox_unset', 'email', { statusCode: 500, durationMs: elapsed() });
+    return errorResponse(res, 'Digest could not be sent', 500);
+  }
+
+  const byCategory: Record<string, number> = {};
+  for (const doc of snapshot.docs) {
+    const category = (doc.data().category as string) || 'Uncategorized';
+    byCategory[category] = (byCategory[category] ?? 0) + 1;
+  }
+
+  const result = await sendEmailSafe(
+    reportDigestEmail(inbox, unreadCount, byCategory),
+    { template: 'report_digest', category: 'transactional' }
+  );
+
+  logInfo('report_digest_sent', 'email', {
+    unreadCount, delivered: !!result, statusCode: 200, durationMs: elapsed(),
+  });
+
+  return successResponse(res, { unreadCount, sent: !!result });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main handler
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -270,6 +346,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
   const elapsed = startTimer();
+
+  // The cron runs before verifyAuth: a scheduled invocation carries
+  // CRON_SECRET, not a Firebase token.
+  if (req.method === 'GET') {
+    try {
+      return await handleReportDigest(req, res, elapsed);
+    } catch (err: any) {
+      logError('report_digest_error', 'email', { statusCode: 500, durationMs: elapsed(), errorMessage: err?.message });
+      return errorResponse(res, 'Digest failed', 500);
+    }
+  }
 
   if (req.method !== 'POST') {
     return errorResponse(res, 'Method not allowed', 405);

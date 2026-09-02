@@ -64,7 +64,7 @@ export const EMAIL_COPY_BASE: EmailCopy = {
     subject: 'Bem-vindo ao Multi Lingo AI',
     heading: 'A tua prática começa aqui',
     body: 'A tua conta está pronta. Escolhe um dialeto, define os teus interesses e começa a praticar — o tradutor, os jogos de palavras e o treino para exames estão à tua espera.',
-    cta: 'Começar a praticar',
+    cta: 'Aceitar o desafio',
   },
   subscription_activated: {
     subject: 'O teu plano {{tier}} está ativo',

@@ -201,3 +201,52 @@ export function contactFormEmail(
 
   return { to, subject: `[Contact] ${submission.subject} - ${submission.name}`, html, text, replyTo: submission.email };
 }
+
+/**
+ * Nightly unread-report digest, delivered to CONTACT_INBOX.
+ *
+ * English like contactFormEmail, and for the same reason: the audience is the
+ * operator, not a user, so it doesn't belong in the localized copy. That also
+ * keeps it out of EMAIL_COPY_BASE and the frontend locale files.
+ */
+export function reportDigestEmail(
+  to: string,
+  unreadCount: number,
+  byCategory: Record<string, number>
+): EmailMessage {
+  const base = appUrl();
+  const plural = unreadCount === 1 ? 'report' : 'reports';
+  const subject = `${unreadCount} unread ${plural} — Multi Lingo AI`;
+
+  const rows = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
+
+  const html = `<!doctype html>
+<html><body style="margin:0;padding:24px;background:#f1f5f9;font-family:Helvetica,Arial,sans-serif;">
+  <table role="presentation" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#ffffff;border:3px solid #0f172a;border-radius:16px;padding:24px;">
+    <tr><td>
+      <p style="margin:0 0 4px;font-size:12px;font-weight:bold;text-transform:uppercase;letter-spacing:2px;color:#64748b;">Multi Lingo AI</p>
+      <h1 style="margin:0 0 16px;font-size:26px;color:#0f172a;">${unreadCount} unread ${plural}</h1>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:20px;font-size:14px;color:#0f172a;">
+        ${rows.map(([category, count]) =>
+          `<tr><td style="padding:4px 12px 4px 0;color:#64748b;">${escapeHtml(category)}</td><td style="padding:4px 0;font-weight:bold;">${count}</td></tr>`
+        ).join('')}
+      </table>
+      <table role="presentation" cellpadding="0" cellspacing="0">
+        <tr><td style="background:#2563eb;border:3px solid #0f172a;border-radius:12px;">
+          <a href="${base}/admin" style="display:inline-block;padding:14px 28px;font-size:15px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;color:#ffffff;text-decoration:none;">Open the admin panel</a>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+
+  const text = [
+    `${unreadCount} unread ${plural} — Multi Lingo AI`,
+    '',
+    ...rows.map(([category, count]) => `${category}: ${count}`),
+    '',
+    `Open the admin panel: ${base}/admin`,
+  ].join('\n');
+
+  return { to, subject, html, text };
+}

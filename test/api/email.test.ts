@@ -46,10 +46,17 @@ function post(token: string, body: any) {
 }
 
 describe('POST /api/email — guards', () => {
-  it('rejects non-POST', async () => {
-    const { req, res } = createMockReqRes({ method: 'GET', headers: bearer(TOKEN_ALICE) });
+  it.each(['PUT', 'DELETE', 'PATCH'])('rejects %s', async (method) => {
+    const { req, res } = createMockReqRes({ method, headers: bearer(TOKEN_ALICE) });
     await handler(req, res);
     expect(res.statusCode).toBe(405);
+  });
+
+  it('will not run the cron digest for a signed-in user — GET needs CRON_SECRET', async () => {
+    const { req, res } = createMockReqRes({ method: 'GET', headers: bearer(TOKEN_ALICE) });
+    await handler(req, res);
+    expect(res.statusCode).toBe(401);
+    expect(emailUtils.getSent()).toHaveLength(0);
   });
 
   it('requires a verified session — this is what stops it being an open relay', async () => {
@@ -246,5 +253,96 @@ describe('POST /api/email — broadcast', () => {
     // admin1 has neither a token nor a push opt-in.
     expect(res.body.data.pushSkipped).toBe(1);
     expect(pushMock.sendPushToTokens).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('GET /api/email — nightly report digest', () => {
+  const CRON_SECRET = 'test-cron-secret';
+
+  /** Seeds a report under appConfig/config/reports. */
+  const seedReport = (id: string, category: string, read = false) =>
+    __testUtils.seedDoc('appConfig/config/reports', id, {
+      category, read, message: 'something broke', createdAt: '2026-09-01T10:00:00.000Z',
+    });
+
+  const cronRequest = (auth?: string) =>
+    createMockReqRes({ method: 'GET', headers: auth ? { authorization: auth } : {} });
+
+  beforeEach(() => {
+    process.env.CRON_SECRET = CRON_SECRET;
+  });
+
+  it('refuses a request without the cron secret', async () => {
+    seedReport('r1', 'Bug / Error');
+    const { req, res } = cronRequest();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(401);
+    expect(emailUtils.getSent()).toHaveLength(0);
+  });
+
+  it('refuses a wrong secret', async () => {
+    const { req, res } = cronRequest('Bearer nope');
+    await handler(req, res);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('refuses when CRON_SECRET is not configured at all', async () => {
+    delete process.env.CRON_SECRET;
+    const { req, res } = cronRequest('Bearer anything');
+    await handler(req, res);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('sends nothing when there are no unread reports', async () => {
+    seedReport('r1', 'Bug / Error', true); // already read
+    const { req, res } = cronRequest(`Bearer ${CRON_SECRET}`);
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toEqual({ unreadCount: 0, sent: false });
+    expect(emailUtils.getSent()).toHaveLength(0);
+  });
+
+  it('counts only unread reports and groups them by category', async () => {
+    seedReport('r1', 'Bug / Error');
+    seedReport('r2', 'Bug / Error');
+    seedReport('r3', 'Wrong translation');
+    seedReport('r4', 'Other', true); // read — must not be counted
+
+    const { req, res } = cronRequest(`Bearer ${CRON_SECRET}`);
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.unreadCount).toBe(3);
+
+    const sent = emailUtils.sentFor('report_digest');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].message.to).toBe('inbox@test.local');
+    expect(sent[0].message.subject).toContain('3 unread reports');
+    expect(sent[0].message.text).toContain('Bug / Error: 2');
+    expect(sent[0].message.text).toContain('Wrong translation: 1');
+  });
+
+  it('uses the singular for exactly one report', async () => {
+    seedReport('r1', 'Other');
+    const { req, res } = cronRequest(`Bearer ${CRON_SECRET}`);
+    await handler(req, res);
+    expect(emailUtils.sentFor('report_digest')[0].message.subject).toContain('1 unread report —');
+  });
+
+  it('does not send twice on the same day — cron delivery can duplicate a run', async () => {
+    seedReport('r1', 'Bug / Error');
+
+    const first = cronRequest(`Bearer ${CRON_SECRET}`);
+    await handler(first.req, first.res);
+    expect(emailUtils.sentFor('report_digest')).toHaveLength(1);
+
+    const second = cronRequest(`Bearer ${CRON_SECRET}`);
+    await handler(second.req, second.res);
+
+    expect(second.res.statusCode).toBe(200);
+    expect(second.res.body.data.skipped).toBe('already ran today');
+    expect(emailUtils.sentFor('report_digest')).toHaveLength(1);
   });
 });
