@@ -176,7 +176,16 @@ async function handleBroadcast(req: VercelRequest, res: VercelResponse, uid: str
     const targetUid = asString(req.body?.uid);
     if (!targetUid) return errorResponse(res, 'A target uid is required', 400);
     const doc = await db.collection('users').doc(targetUid).get();
-    if (!doc.exists) return errorResponse(res, 'User not found', 404);
+    if (!doc.exists) {
+      // Logged with the value actually looked up. The composer once sent a
+      // display name here, because listAllUserProfiles() renames the
+      // document id to `uid` and the <option> was reading a non-existent
+      // `id` — which 404s identically to a genuinely missing user.
+      logWarn('broadcast_target_not_found', 'email', {
+        uid, targetUid, statusCode: 404, durationMs: elapsed(),
+      });
+      return errorResponse(res, 'User not found', 404);
+    }
     recipients = [{ uid: doc.id, data: doc.data()! }];
   } else {
     let query: FirebaseFirestore.Query = db.collection('users');
