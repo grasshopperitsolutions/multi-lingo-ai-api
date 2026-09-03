@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from './types';
-import { requireAdmin } from './require-admin';
+import { isAdmin, requireAdmin } from './require-admin';
 import { resolveCollectionPolicy } from './collection-policies';
 
 /**
@@ -179,6 +179,47 @@ export async function authorizeGenericDocRead(
     return true;
   }
   return requireAdmin(uid, req, res);
+}
+
+/**
+ * Applies the same ownership rule authorizeGenericDocRead() enforces on a
+ * single document to the results of a collection *query*.
+ *
+ * Without this, the two read paths disagree: fetching one document by id
+ * runs the owner check, but querying the collection returns whole documents
+ * with no check at all — so `GET /api/firestore?collection=files&filters=[]`
+ * handed every user's file metadata to any signed-in caller, anonymous
+ * guests included, even though fetching any one of those documents by id
+ * would have been refused.
+ *
+ * Filters rather than rejects, because a query legitimately spans
+ * documents the caller may and may not see: a document with neither
+ * `createdBy` nor `userId` is shared content and stays, one owned by
+ * somebody else is dropped. Only collections on the strict default policy
+ * are ownership-scoped — 'public'/'authenticated' skip the check, and
+ * 'admin' is already gated before the query runs.
+ *
+ * The admin lookup costs a Firestore read, so it only happens when the
+ * filter actually removed something — the common case (a user querying
+ * their own documents) pays nothing.
+ */
+export async function filterQueryResultsByOwnership<T extends Record<string, unknown>>(
+  segments: string[],
+  documents: T[],
+  uid: string
+): Promise<T[]> {
+  if (resolveCollectionPolicy(segments).read !== 'owner-or-admin') {
+    return documents;
+  }
+
+  const visible = documents.filter((doc) => {
+    const ownerId = (doc.createdBy ?? doc.userId) as string | undefined;
+    return ownerId === undefined || ownerId === uid;
+  });
+
+  if (visible.length === documents.length) return documents;
+
+  return (await isAdmin(uid)) ? documents : visible;
 }
 
 /**

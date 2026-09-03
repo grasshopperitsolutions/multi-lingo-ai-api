@@ -157,6 +157,67 @@ describe('GET /api/firestore — filtered query (findings 1.2, 1.3, 3.2)', () =>
   });
 });
 
+describe('GET /api/firestore — collection queries respect document ownership', () => {
+  // The single-document path has always run the owner check, but the query
+  // path returned whole documents with none — so `?collection=files&filters=[]`
+  // handed every user's file metadata (names, paths, uploaded content types)
+  // to any signed-in caller, anonymous guests included.
+  beforeEach(() => {
+    __testUtils.seedDoc('files', 'f-alice', { userId: 'alice', fileName: 'mine.pdf' });
+    __testUtils.seedDoc('files', 'f-bob', { userId: 'bob', fileName: 'secret.pdf' });
+    __testUtils.seedDoc('files', 'f-shared', { fileName: 'unowned.pdf' });
+  });
+
+  const queryFiles = (token: string) =>
+    createMockReqRes({
+      method: 'GET',
+      headers: bearer(token),
+      query: { collection: 'files', filters: '[]' },
+    });
+
+  it("drops another user's documents from a query result", async () => {
+    const { req, res } = queryFiles(TOKEN_ALICE);
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    const ids = res.body.data.documents.map((d: { id: string }) => d.id);
+    expect(ids).toContain('f-alice');
+    expect(ids).not.toContain('f-bob');
+    expect(res.body.data.documents.some((d: { fileName: string }) => d.fileName === 'secret.pdf')).toBe(false);
+  });
+
+  it('keeps unowned documents visible — most generic collections are shared content', async () => {
+    const { req, res } = queryFiles(TOKEN_ALICE);
+    await handler(req, res);
+
+    expect(res.body.data.documents.map((d: { id: string }) => d.id)).toContain('f-shared');
+  });
+
+  it('lets an admin see every document', async () => {
+    const { req, res } = queryFiles(TOKEN_ADMIN);
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.documents).toHaveLength(3);
+  });
+
+  it('reports hasMore from the raw page, so paging walks past filtered-out documents', async () => {
+    const { req, res } = createMockReqRes({
+      method: 'GET',
+      headers: bearer(TOKEN_ALICE),
+      query: { collection: 'files', filters: '[]', limit: '2' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    // The page held 2 documents, one of them Bob's: the caller sees fewer
+    // than the limit, but there is genuinely another page behind it.
+    expect(res.body.data.documents.length).toBeLessThan(2);
+    expect(res.body.data.hasMore).toBe(true);
+    expect(res.body.data.lastDocumentId).toBeTruthy();
+  });
+});
+
 describe('POST /api/firestore — self-escalation and doc-hijack chain (finding 1.4)', () => {
   it("strips subscriptionTier when a user POSTs to their own users/{uid} doc — can't self-promote to admin", async () => {
     const { req, res } = createMockReqRes({

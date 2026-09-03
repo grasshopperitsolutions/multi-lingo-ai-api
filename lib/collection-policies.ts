@@ -27,9 +27,15 @@
  *                                   actually protect a server-written
  *                                   collection: a document with no
  *                                   `createdBy`/`userId` field is treated as
- *                                   shared content and allowed through, and
- *                                   the query path applies no per-document
- *                                   check at all.
+ *                                   shared content and allowed through — so
+ *                                   a server-written collection where nobody
+ *                                   is the owner would otherwise be readable
+ *                                   by everybody.
+ *
+ * Both read paths enforce these: single-document reads through
+ * authorizeGenericDocRead(), collection queries through the 'admin' gate in
+ * api/firestore.ts plus filterQueryResultsByOwnership(), which drops
+ * other-owner documents from an 'owner-or-admin' query result.
  */
 
 export type ReadPolicy = 'public' | 'authenticated' | 'owner-or-admin' | 'admin';

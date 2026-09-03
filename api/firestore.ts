@@ -13,6 +13,7 @@ import {
   authorizeGenericDocWrite,
   authorizeGenericDocRead,
   authorizeUsersScopedRead,
+  filterQueryResultsByOwnership,
 } from '../lib/firestore-helpers';
 import { resolveCollectionPolicy } from '../lib/collection-policies';
 import { requireAdmin } from '../lib/require-admin';
@@ -262,12 +263,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             });
           }
 
-          const documents = snapshot.docs.map((doc: FirebaseFirestore.QueryDocumentSnapshot) => ({
-            id: doc.id,
-            ...doc.data(),
-          }));
+          // Ownership is applied after the query, not as an extra `where`:
+          // a collection can mix owned and shared documents, and Firestore
+          // has no "field absent OR equals" filter. hasMore/lastDocumentId
+          // stay keyed to the raw page so paging still walks past documents
+          // this caller can't see instead of stopping at the first one.
+          const documents = await filterQueryResultsByOwnership(
+            segments,
+            snapshot.docs.map((doc: FirebaseFirestore.QueryDocumentSnapshot) => ({
+              id: doc.id,
+              ...doc.data(),
+            })),
+            uid
+          );
 
           const lastVisible = snapshot.docs[snapshot.docs.length - 1];
+          const hasMore = snapshot.docs.length === limit;
 
           logInfo('firestore_query', 'firestore', {
             uid,
@@ -275,7 +286,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             collection,
             filterCount: filters.length,
             resultCount: documents.length,
-            hasMore: documents.length === limit,
+            hasMore,
             statusCode: 200,
             durationMs: elapsed(),
           });
@@ -283,7 +294,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return successResponse(res, {
             documents,
             collection,
-            hasMore: documents.length === limit,
+            hasMore,
             lastDocumentId: lastVisible ? lastVisible.id : null,
           });
         }
