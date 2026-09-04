@@ -10,7 +10,7 @@
   "dependencies": {
     "@google/genai": "^2.20.0",
     "@sentry/node": "^10.73.0",
-    "firebase-admin": "^14.3.0",
+    "firebase-admin": "^13.10.0",
     "micro": "^10.0.1",
     "openai": "^7.8.0",
     "stripe": "^22.6.0"
