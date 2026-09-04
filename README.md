@@ -251,6 +251,8 @@ Optional:
 - `CRON_SECRET`: random string of 16+ characters. Vercel sends it as `Authorization: Bearer <value>` when it invokes the nightly report digest (`GET /api/email`, scheduled in `vercel.json`); without it set, that endpoint refuses every request. The account is on the Vercel Pro plan, so the schedule is honoured to the minute and a more frequent interval is possible if the digest ever needs one (Hobby would cap it at once a day and drift up to an hour).
 - `EMAIL_ENABLED`: set to `false` to make every send a logged no-op (`email_skipped`). Useful for verifying trigger points before DNS is live. Anything other than the literal `false` leaves sending on.
 - `PUSH_ENABLED`: same kill switch for web push. Web push needs no key of its own — it goes through the existing Firebase credentials via FCM — but the frontend needs the matching `VITE_FIREBASE_VAPID_KEY` (Firebase Console → Project Settings → Cloud Messaging → Web Push certificates).
+- `SENTRY_DSN`: enables error reporting (`lib/sentry.ts`). Unset, nothing is reported and the SDK is never even loaded — the import is lazy, so a function that doesn't fail never pays for it. Use an EU-region project (`…ingest.de.sentry.io`); `VERCEL_ENV` and `VERCEL_GIT_COMMIT_SHA` are picked up automatically as the environment and release.
+- `SENTRY_ENABLED`: set to `false` to silence reporting while leaving the DSN in place.
 
 ## Testing
 

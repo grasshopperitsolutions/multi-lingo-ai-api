@@ -5,7 +5,8 @@ import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { stripe } from '../lib/stripe';
-import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
+import { logInfo, logWarn, startTimer } from '../lib/logger';
+import { reportError } from '../lib/sentry';
 import { sendEmailSafe } from '../lib/email';
 import { getEmailCopy } from '../lib/email-copy';
 import {
@@ -534,7 +535,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     try {
       return await handleWebhook(req, res, elapsed);
     } catch (err: any) {
-      logError('stripe_webhook_error', 'stripe', { errorMessage: err?.message, durationMs: elapsed() });
+      await reportError('stripe_webhook_error', 'stripe', err, { durationMs: elapsed() });
       return errorResponse(res, 'Webhook handler failed', 500);
     }
   }
@@ -572,8 +573,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return errorResponse(res, `Unknown action: "${action}". Valid actions: checkout, portal, portal_change_plan`, 400);
     }
   } catch (err: any) {
-    logError('stripe_action_error', 'stripe', {
-      uid, action, errorMessage: err?.message, statusCode: 500, durationMs: elapsed(),
+    await reportError('stripe_action_error', 'stripe', err, {
+      uid, action, statusCode: 500, durationMs: elapsed(),
     });
     return errorResponse(res, 'Stripe action failed', 500);
   }

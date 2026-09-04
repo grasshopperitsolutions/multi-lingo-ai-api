@@ -18,7 +18,8 @@ import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
 import { requireAdmin } from '../lib/require-admin';
 import { db, FieldValue } from '../lib/firebase-admin';
-import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
+import { logInfo, logWarn, startTimer } from '../lib/logger';
+import { reportError, reportMessage } from '../lib/sentry';
 import { sendEmailSafe, sendBatchSafe, type EmailMessage } from '../lib/email';
 import { sendPushToTokens, isPushSubscribed } from '../lib/push';
 import { getEmailCopy } from '../lib/email-copy';
@@ -95,7 +96,9 @@ async function handleContact(req: VercelRequest, res: VercelResponse, uid: strin
 
   const inbox = process.env.CONTACT_INBOX;
   if (!inbox) {
-    logError('contact_inbox_unset', 'email', { uid, statusCode: 500, durationMs: elapsed() });
+    await reportMessage('contact_inbox_unset', 'email', 'CONTACT_INBOX is not set', {
+      uid, statusCode: 500, durationMs: elapsed(),
+    });
     return errorResponse(res, 'Failed to send message', 500);
   }
 
@@ -324,7 +327,9 @@ async function handleReportDigest(req: VercelRequest, res: VercelResponse, elaps
 
   const inbox = process.env.CONTACT_INBOX;
   if (!inbox) {
-    logError('contact_inbox_unset', 'email', { statusCode: 500, durationMs: elapsed() });
+    await reportMessage('contact_inbox_unset', 'email', 'CONTACT_INBOX is not set', {
+      statusCode: 500, durationMs: elapsed(),
+    });
     return errorResponse(res, 'Digest could not be sent', 500);
   }
 
@@ -362,7 +367,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     try {
       return await handleReportDigest(req, res, elapsed);
     } catch (err: any) {
-      logError('report_digest_error', 'email', { statusCode: 500, durationMs: elapsed(), errorMessage: err?.message });
+      await reportError('report_digest_error', 'email', err, { statusCode: 500, durationMs: elapsed() });
       return errorResponse(res, 'Digest failed', 500);
     }
   }
@@ -389,8 +394,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return errorResponse(res, `Unknown action: "${action}". Valid actions: contact, broadcast`, 400);
     }
   } catch (err: any) {
-    logError('email_action_error', 'email', {
-      uid, action, statusCode: 500, durationMs: elapsed(), errorMessage: err?.message,
+    await reportError('email_action_error', 'email', err, {
+      uid, action, statusCode: 500, durationMs: elapsed(),
     });
     return errorResponse(res, 'Notification request failed', 500);
   }

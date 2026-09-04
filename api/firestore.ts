@@ -3,7 +3,8 @@ import { db, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
-import { logInfo, logWarn, logError, startTimer } from '../lib/logger';
+import { logInfo, logWarn, startTimer } from '../lib/logger';
+import { reportError } from '../lib/sentry';
 import {
   parseCollectionPath,
   isUsersCollection,
@@ -517,11 +518,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return errorResponse(res, 'Method not allowed', 405);
     }
   } catch (error: any) {
-    logError('firestore_unhandled_error', 'firestore', {
+    await reportError('firestore_unhandled_error', 'firestore', error, {
       method: req.method,
       statusCode: 500,
       durationMs: elapsed(),
-      errorMessage: error?.message,
     });
     return errorResponse(res, 'Failed to process Firestore request', 500);
   }

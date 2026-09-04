@@ -6,6 +6,7 @@ import { askPerplexity } from '../lib/providers/perplexity';
 import { askGemini } from '../lib/providers/gemini';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { log, logInfo, logError, startTimer } from '../lib/logger';
+import { reportError } from '../lib/sentry';
 import type { VercelRequest, VercelResponse, AskAIRequest, SubscriptionTier } from '../lib/types';
 
 const EXPLORER_DAILY_LIMIT = 3;
@@ -148,7 +149,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       upstreamStatus >= 400 && upstreamStatus < 600 ? upstreamStatus : 500;
     const message = err?.message ?? 'AI request failed';
 
-    logError('ai_request_error', 'ask-ai', {
+    const extra = {
       uid,
       method: req.method,
       provider,
@@ -156,9 +157,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       tier,
       statusCode: httpStatus,
       durationMs: elapsed(),
-      errorMessage: message,
       upstreamStatus,
-    });
+    };
+
+    // A 4xx from the provider is the provider answering — a rate limit, a
+    // rejected prompt, a context overflow. Those belong in the logs, not in
+    // an alert. Anything 5xx (or unrecognized, which defaults to 500) means
+    // the provider broke or we did, and that is worth waking up for.
+    if (httpStatus >= 500) {
+      await reportError('ai_request_error', 'ask-ai', err, extra);
+    } else {
+      logError('ai_request_error', 'ask-ai', { ...extra, errorMessage: message });
+    }
 
     return errorResponse(res, message, httpStatus);
   }

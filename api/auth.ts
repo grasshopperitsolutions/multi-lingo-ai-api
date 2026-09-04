@@ -5,10 +5,29 @@ import { verifyAuth } from '../lib/verify-auth';
 import { requireAdmin } from '../lib/require-admin';
 import { deleteUserAccount } from '../lib/delete-user-account';
 import { logInfo, logError, startTimer } from '../lib/logger';
+import { reportError } from '../lib/sentry';
 import { sendEmailSafe } from '../lib/email';
 import { getEmailCopy, FALLBACK_LOCALE } from '../lib/email-copy';
 import { welcomeEmail } from '../lib/email-templates';
 import type { VercelRequest, VercelResponse } from '../lib/types';
+
+/**
+ * Firebase Admin error codes that mean "this token is no longer good",
+ * which is an ordinary outcome rather than a fault: a tab left open past
+ * the one-hour token lifetime, a stale client retrying, a signed-out
+ * session. They still produce a 401 and a log line — they just don't
+ * produce an alert, or every real sign-in bug would be buried under them.
+ */
+const EXPECTED_AUTH_ERROR_CODES = new Set([
+  'auth/id-token-expired',
+  'auth/id-token-revoked',
+  'auth/invalid-id-token',
+  'auth/session-cookie-expired',
+  'auth/session-cookie-revoked',
+  'auth/argument-error',
+  'auth/user-not-found',
+  'auth/user-disabled',
+]);
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
@@ -61,13 +80,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         uid: targetUid,
       });
     } catch (error: any) {
-      logError('account_delete_failed', 'auth', {
+      await reportError('account_delete_failed', 'auth', error, {
         uid,
         targetUid,
         method: req.method,
         statusCode: 500,
         durationMs: elapsed(),
-        errorMessage: error?.message,
       });
       return errorResponse(res, 'Account deletion failed', 500);
     }
@@ -219,12 +237,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
   } catch (error: any) {
-    logError('auth_failed', 'auth', {
+    // An expired or malformed ID token is a normal event — a user left a
+    // tab open past the hour, or a stale client retried. Reporting those
+    // would bury the failures that actually mean something (a Firestore
+    // write refused mid sign-in, say) under thousands of non-issues.
+    const extra = {
       method: req.method,
       statusCode: 401,
       durationMs: elapsed(),
-      errorMessage: error?.message,
-    });
+    };
+    if (EXPECTED_AUTH_ERROR_CODES.has(error?.code)) {
+      logError('auth_failed', 'auth', { ...extra, errorMessage: error?.message });
+    } else {
+      await reportError('auth_failed', 'auth', error, extra);
+    }
     return errorResponse(res, 'Authentication failed', 401);
   }
 }

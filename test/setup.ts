@@ -16,3 +16,8 @@ process.env.STRIPE_PRICE_MAESTRO_YEARLY ??= 'price_maestro_yearly';
 // exercise the provider path unset this themselves.
 process.env.EMAIL_ENABLED ??= 'false';
 process.env.PUSH_ENABLED ??= 'false';
+
+// Same reasoning for error reporting: a real SENTRY_DSN in the shell must
+// not turn a test run into a wave of issues in the production project.
+// lib/sentry.ts is inert without a DSN, and this closes the other door.
+process.env.SENTRY_ENABLED ??= 'false';
