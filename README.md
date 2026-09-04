@@ -4,7 +4,7 @@ A consolidated API service for authentication, Firestore operations, and storage
 
 ## API Endpoints
 
-This API has **5 endpoints**:
+This API has **6 endpoints**:
 
 ### 1. Authentication - `POST` / `DELETE /api/auth`
 
@@ -175,7 +175,17 @@ Proxies chat/completion requests to OpenAI, Gemini, or Perplexity. `prompt` is c
 
 ### 5. Stripe - `POST /api/stripe`
 
-Handles Stripe Checkout, Billing Portal sessions, and the Stripe webhook (routed by the presence of a `stripe-signature` header, verified via `STRIPE_WEBHOOK_SECRET` — no separate auth needed for that path).
+Handles Stripe Checkout, Billing Portal sessions, and the Stripe webhook (routed by the presence of a `stripe-signature` header, verified via `STRIPE_WEBHOOK_SECRET` — no separate auth needed for that path). Webhook deliveries are made idempotent by a `stripeEvents/{event.id}` document created with `.create()`, so a Stripe retry is a no-op rather than a duplicate email.
+
+### 6. Notifications - `POST` / `GET /api/email`
+
+`POST { action: 'contact' }` submits the public contact form. It requires a Firebase session, which anonymous guest sessions satisfy — that is what stops it being an open mail relay — and is rate-limited to 3 per hour per caller. Every submission is stored in `contactSubmissions` before the send, so a message survives a provider outage.
+
+`POST { action: 'broadcast' }` is admin-only and sends an announcement to a single user, a tier, or everyone (the all-users mode needs `confirm: "ALL"`). Recipients who have opted out of the `announcements` category are skipped, and delivery uses Resend's batch endpoint rather than one request per recipient.
+
+`GET` is the nightly unread-report digest invoked by Vercel Cron. It is not callable by the app: it requires `Authorization: Bearer $CRON_SECRET`, is idempotent per day, and sends nothing when there are no unread reports.
+
+Transactional mail (welcome, subscription activated/cancelled/ended, payment failed, account deleted) is sent inline from the endpoints that cause it, never through this one. It is exempt from the opt-out categories.
 
 ## User Data Management
 
@@ -277,10 +287,12 @@ This API is designed for Vercel serverless deployment. Each endpoint is a separa
 - CORS is origin-allow-listed, not wildcarded
 - `ask-ai` enforces per-tier daily quotas and request size caps by default
 - Security-relevant response headers (`X-Content-Type-Options`, `X-Frame-Options`, `Content-Security-Policy`, `Strict-Transport-Security`) are set on every `/api/*` response
+- Collection *queries* are ownership-filtered too, not just single-document reads — server-written collections (`contactSubmissions`, `stripeEvents`, `cronRuns`, reports) are admin-read-only, and a default-policy query drops documents belonging to other users
+- Unhandled failures are reported to Sentry with the uid masked to 8 characters, no IP address, and no request body
 
 ## Migration Notes
 
-This API has been consolidated from multiple individual endpoints into 5 main endpoints for better maintainability and scalability. The old endpoints have been removed:
+This API has been consolidated from multiple individual endpoints into 6 main endpoints for better maintainability and scalability. The old endpoints have been removed:
 - All auth operations are now in `/api/auth`
 - All Firestore operations are now in `/api/firestore`
 - All storage operations are now in `/api/storage`

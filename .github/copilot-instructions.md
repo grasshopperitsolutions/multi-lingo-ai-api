@@ -17,6 +17,8 @@ Read [../CLAUDE.md](../CLAUDE.md) first. Treat it as the canonical architecture 
 - Preserve owner-or-admin checks, the `users/{uid}` boundary, protected user fields, CORS allow-listing, request-size caps, and server-only credentials.
 - Never trust client-supplied subscription tiers, Stripe identifiers, ownership fields, or arbitrary storage prefixes.
 - Prefer an existing consolidated endpoint over adding a new route.
+- Keep `sendEmailSafe`/`sendBatchSafe` on every mail call site: a failed notification must never fail the request that triggered it.
+- Keep the Sentry flush before the response in `lib/sentry.ts`; an unflushed event is lost when Vercel freezes the instance.
 
 ## Validation
 
