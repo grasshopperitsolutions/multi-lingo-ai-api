@@ -101,6 +101,32 @@ async function recipientFor(uid: string) {
   return { email: data.email as string, name: data.displayName as string | undefined, locale: data.interfaceLang as string | undefined, before: data };
 }
 
+/**
+ * The end of the current billing period, as a unix timestamp.
+ *
+ * Stripe's 2025-03-31.basil API moved `current_period_end` off the
+ * Subscription and onto each subscription item, since one subscription can
+ * now carry items on different billing cycles. Every subscription this app
+ * creates has exactly one item — tierFromPriceId() already reads
+ * `items.data[0]` on that assumption — so the first item's period is the
+ * subscription's period.
+ *
+ * The top-level field is still read as a fallback on purpose. Webhook
+ * events are delivered in the API version pinned to the endpoint in the
+ * Stripe Dashboard, which is set independently of the version this library
+ * requests with (lib/stripe.ts). Until that endpoint is also moved to a
+ * post-Basil version, `event.data.object` still carries the old shape, and
+ * without this fallback every renewal date would silently be stored as
+ * null.
+ */
+function periodEndOf(subscription: Stripe.Subscription): number | null {
+  const fromItem = subscription.items?.data?.[0]?.current_period_end;
+  if (typeof fromItem === 'number') return fromItem;
+
+  const legacy = (subscription as unknown as { current_period_end?: number }).current_period_end;
+  return typeof legacy === 'number' ? legacy : null;
+}
+
 /** Formats a Stripe unix timestamp for use in email copy, in the recipient's locale. */
 function formatPeriodEnd(unixSeconds: number | null | undefined, locale?: string): string {
   if (!unixSeconds) return '';
@@ -391,7 +417,7 @@ async function handleWebhook(
         stripeCustomerId: customerId,
         stripeSubscriptionId: subscriptionId,
         subscriptionStatus: subscription.status,
-        currentPeriodEnd: subscription.current_period_end,
+        currentPeriodEnd: periodEndOf(subscription),
         cancelAtPeriodEnd: subscription.cancel_at_period_end,
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
@@ -431,7 +457,7 @@ async function handleWebhook(
         subscriptionTier: tier,
         stripeSubscriptionId: subscription.id,
         subscriptionStatus: subscription.status,
-        currentPeriodEnd: subscription.current_period_end,
+        currentPeriodEnd: periodEndOf(subscription),
         // Portal cancellations are deferred to period end by default — the
         // subscription stays "active" (full access) the whole time, so this
         // is the only signal the frontend has that a cancellation was scheduled.
@@ -448,7 +474,7 @@ async function handleWebhook(
         await sendEmailSafe(
           subscriptionCancelScheduledEmail(
             copy, recipient.email, recipient.name, tier,
-            formatPeriodEnd(subscription.current_period_end, recipient.locale)
+            formatPeriodEnd(periodEndOf(subscription), recipient.locale)
           ),
           { template: 'subscription_cancel_scheduled', uid, category: 'transactional' }
         );

@@ -1,5 +1,14 @@
 import type { VercelRequest, VercelResponse } from '../lib/types';
 import { db, FieldValue } from '../lib/firebase-admin';
+// firebase-admin v14 removed the global `FirebaseFirestore` type namespace;
+// these now come from the firestore subpath.
+import type {
+  CollectionReference,
+  DocumentReference,
+  Query,
+  QueryDocumentSnapshot,
+  WhereFilterOp,
+} from 'firebase-admin/firestore';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
@@ -22,14 +31,14 @@ import { requireAdmin } from '../lib/require-admin';
 /**
  * Resolves a slash-separated collection path to a Firestore CollectionReference.
  */
-function resolveCollection(path: string): FirebaseFirestore.CollectionReference {
+function resolveCollection(path: string): CollectionReference {
   const segments = parseCollectionPath(path);
 
   if (segments.length === 1) {
     return db.collection(segments[0]);
   }
 
-  let ref: FirebaseFirestore.DocumentReference = db
+  let ref: DocumentReference = db
     .collection(segments[0])
     .doc(segments[1]);
 
@@ -46,7 +55,7 @@ function resolveCollection(path: string): FirebaseFirestore.CollectionReference 
 function resolveDocument(
   collectionPath: string,
   docId: string
-): FirebaseFirestore.DocumentReference {
+): DocumentReference {
   return resolveCollection(collectionPath).doc(docId);
 }
 
@@ -130,7 +139,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           updatedAt: FieldValue.serverTimestamp(),
         };
 
-        let docRef: FirebaseFirestore.DocumentReference;
+        let docRef: DocumentReference;
 
         if (id) {
           docRef = resolveDocument(collection, id);
@@ -214,7 +223,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             : DEFAULT_QUERY_LIMIT;
           const startAfter = req.query.startAfter;
 
-          let firestoreQuery: FirebaseFirestore.Query = resolveCollection(
+          let firestoreQuery: Query = resolveCollection(
             collection as string
           );
 
@@ -230,7 +239,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
             firestoreQuery = firestoreQuery.where(
               field,
-              op as FirebaseFirestore.WhereFilterOp,
+              op as WhereFilterOp,
               value
             );
           }
@@ -271,7 +280,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // this caller can't see instead of stopping at the first one.
           const documents = await filterQueryResultsByOwnership(
             segments,
-            snapshot.docs.map((doc: FirebaseFirestore.QueryDocumentSnapshot) => ({
+            snapshot.docs.map((doc: QueryDocumentSnapshot) => ({
               id: doc.id,
               ...doc.data(),
             })),

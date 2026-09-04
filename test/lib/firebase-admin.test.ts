@@ -10,6 +10,17 @@ const FAKE_PRIVATE_KEY = generateKeyPairSync('rsa', { modulusLength: 2048 })
 // Deliberately NOT mocked — this exercises the real module's own env-var
 // guard (finding 4.5), which only matters when nothing else has stubbed it out.
 
+// Every test here calls vi.resetModules() and then re-imports the real
+// lib/firebase-admin, which drags the whole firebase-admin package tree in
+// again from cold — and the last one additionally parses a real RSA
+// credential and constructs the Firestore and Storage clients. That is
+// genuinely slow work, not a hang: it takes well over vitest's 5s default
+// once the rest of the suite is running in parallel, which is why this file
+// failed intermittently on a developer machine and consistently on CI's
+// 2-core runner. Nothing else in the suite pays this cost, because
+// everything else mocks the module.
+vi.setConfig({ testTimeout: 60_000 });
+
 const ENV_KEYS = ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY', 'FIREBASE_STORAGE_BUCKET'] as const;
 let saved: Record<string, string | undefined> = {};
 

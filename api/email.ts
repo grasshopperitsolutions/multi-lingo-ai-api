@@ -18,6 +18,7 @@ import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
 import { requireAdmin } from '../lib/require-admin';
 import { db, FieldValue } from '../lib/firebase-admin';
+import type { DocumentData, Query } from 'firebase-admin/firestore';
 import { logInfo, logWarn, startTimer } from '../lib/logger';
 import { reportError, reportMessage } from '../lib/sentry';
 import { sendEmailSafe, sendBatchSafe, type EmailMessage } from '../lib/email';
@@ -173,7 +174,7 @@ async function handleBroadcast(req: VercelRequest, res: VercelResponse, uid: str
   if (!sendEmail && !sendPush) return errorResponse(res, 'Pick at least one channel', 400);
 
   // Resolve the audience.
-  let recipients: Array<{ uid: string; data: FirebaseFirestore.DocumentData }>;
+  let recipients: Array<{ uid: string; data: DocumentData }>;
 
   if (mode === 'user') {
     const targetUid = asString(req.body?.uid);
@@ -191,7 +192,7 @@ async function handleBroadcast(req: VercelRequest, res: VercelResponse, uid: str
     }
     recipients = [{ uid: doc.id, data: doc.data()! }];
   } else {
-    let query: FirebaseFirestore.Query = db.collection('users');
+    let query: Query = db.collection('users');
 
     if (mode === 'tier') {
       const tier = asString(req.body?.tier);

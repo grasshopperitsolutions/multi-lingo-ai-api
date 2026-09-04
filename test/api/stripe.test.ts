@@ -226,6 +226,77 @@ describe('POST /api/stripe — webhook', () => {
     expect(stored?.stripeSubscriptionId).toBe('sub_new');
   });
 
+  // Stripe's 2025-03-31.basil API moved current_period_end from the
+  // subscription onto its items. The library now requests a post-Basil
+  // version, but webhook events arrive in whatever version the endpoint is
+  // pinned to in the Stripe Dashboard — so both shapes have to work, or
+  // renewal dates silently stop being stored.
+  describe('current_period_end across API versions', () => {
+    const activate = async (subscription: Record<string, unknown>) => {
+      stripeUtils.seedSubscription('sub_new', subscription);
+      stripeUtils.setWebhookEvent({
+        id: `evt_${Math.random()}`,
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            mode: 'subscription',
+            customer: 'cus_alice',
+            subscription: 'sub_new',
+            metadata: { firebaseUid: 'alice' },
+          },
+        },
+      });
+      const { req, res } = createMockReqRes({
+        method: 'POST',
+        headers: { 'stripe-signature': 'valid-sig' },
+        rawBody: JSON.stringify({ type: 'checkout.session.completed' }),
+      });
+      await handler(req, res);
+      expect(res.statusCode).toBe(200);
+      return fbUtils.getDoc('users', 'alice');
+    };
+
+    it('reads the period end off the subscription item (Basil and later)', async () => {
+      const stored = await activate({
+        status: 'active',
+        cancel_at_period_end: false,
+        items: { data: [{ price: { id: 'price_voyager_monthly' }, current_period_end: 9999 }] },
+      });
+      expect(stored?.currentPeriodEnd).toBe(9999);
+    });
+
+    it('falls back to the top-level field when the webhook endpoint is on an older version', async () => {
+      const stored = await activate({
+        status: 'active',
+        cancel_at_period_end: false,
+        current_period_end: 1234,
+        items: { data: [{ price: { id: 'price_voyager_monthly' } }] },
+      });
+      expect(stored?.currentPeriodEnd).toBe(1234);
+    });
+
+    it('prefers the item when both are present, since that is the newer source', async () => {
+      const stored = await activate({
+        status: 'active',
+        cancel_at_period_end: false,
+        current_period_end: 1234,
+        items: { data: [{ price: { id: 'price_voyager_monthly' }, current_period_end: 9999 }] },
+      });
+      expect(stored?.currentPeriodEnd).toBe(9999);
+    });
+
+    it('stores null rather than undefined when neither is present', async () => {
+      // Firestore rejects an undefined value outright, so the handler would
+      // throw and the whole webhook would 500 instead of just missing a date.
+      const stored = await activate({
+        status: 'active',
+        cancel_at_period_end: false,
+        items: { data: [{ price: { id: 'price_voyager_monthly' } }] },
+      });
+      expect(stored?.currentPeriodEnd).toBeNull();
+    });
+  });
+
   it('resets the tier to explorer on customer.subscription.deleted', async () => {
     fbUtils.seedDoc('users', 'alice', { subscriptionTier: 'voyager', stripeCustomerId: 'cus_alice' });
     stripeUtils.setWebhookEvent({
