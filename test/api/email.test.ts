@@ -179,7 +179,10 @@ describe('POST /api/email — broadcast', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body.data.total).toBe(2);
-    expect(res.body.data.emailSent).toBe(2);
+    // Queued, not sent — the cron releases these at the daily cap.
+    expect(res.body.data.emailQueued).toBe(2);
+    expect(res.body.data.queueDepth).toBe(2);
+    expect(emailUtils.getSent()).toHaveLength(0);
   });
 
   it('skips users who opted out of announcements', async () => {
@@ -192,9 +195,12 @@ describe('POST /api/email — broadcast', () => {
     const { req, res } = post(TOKEN_ADMIN, { ...BROADCAST, mode: 'all', confirm: 'ALL' });
     await handler(req, res);
 
-    expect(res.body.data.emailSent).toBe(1);
+    // The opt-out is applied at enqueue time, from the user documents already
+    // in hand — the drain has no per-recipient preference check of its own.
+    expect(res.body.data.emailQueued).toBe(1);
     expect(res.body.data.emailSkipped).toBe(1);
-    expect(emailUtils.getSent().every((s) => s.message.to !== 'alice@test.local')).toBe(true);
+    const queued = Object.values(__testUtils.dumpCollection('mailQueue')) as Array<{ to: string }>;
+    expect(queued.every((row) => row.to !== 'alice@test.local')).toBe(true);
   });
 
   it('targets a single user', async () => {
@@ -203,7 +209,8 @@ describe('POST /api/email — broadcast', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body.data.total).toBe(1);
-    expect(emailUtils.getSent()[0].message.to).toBe('alice@test.local');
+    const queued = Object.values(__testUtils.dumpCollection('mailQueue')) as Array<{ to: string }>;
+    expect(queued[0].to).toBe('alice@test.local');
   });
 
   it('404s for a target user that does not exist', async () => {
@@ -219,7 +226,8 @@ describe('POST /api/email — broadcast', () => {
     await handler(req, res);
 
     expect(res.body.data.total).toBe(1);
-    expect(emailUtils.getSent()[0].message.to).toBe('carol@test.local');
+    const queued = Object.values(__testUtils.dumpCollection('mailQueue')) as Array<{ to: string }>;
+    expect(queued[0].to).toBe('carol@test.local');
   });
 
   it('requires a subject, a body and at least one channel', async () => {
@@ -300,7 +308,7 @@ describe('GET /api/email — nightly report digest', () => {
     await handler(req, res);
 
     expect(res.statusCode).toBe(200);
-    expect(res.body.data).toEqual({ unreadCount: 0, sent: false });
+    expect(res.body.data.digest).toEqual({ unreadCount: 0, sent: false });
     expect(emailUtils.getSent()).toHaveLength(0);
   });
 
@@ -314,7 +322,7 @@ describe('GET /api/email — nightly report digest', () => {
     await handler(req, res);
 
     expect(res.statusCode).toBe(200);
-    expect(res.body.data.unreadCount).toBe(3);
+    expect(res.body.data.digest.unreadCount).toBe(3);
 
     const sent = emailUtils.sentFor('report_digest');
     expect(sent).toHaveLength(1);
@@ -342,7 +350,7 @@ describe('GET /api/email — nightly report digest', () => {
     await handler(second.req, second.res);
 
     expect(second.res.statusCode).toBe(200);
-    expect(second.res.body.data.skipped).toBe('already ran today');
+    expect(second.res.body.data.digest.skipped).toBe('already ran today');
     expect(emailUtils.sentFor('report_digest')).toHaveLength(1);
   });
 });

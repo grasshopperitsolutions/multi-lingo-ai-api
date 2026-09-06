@@ -69,7 +69,7 @@ One endpoint, `api/email.ts`, carries three jobs, because a consolidated route i
 
 - `POST { action: 'contact' }` — the public contact form. Requires `verifyAuth`, which anonymous guest sessions satisfy; that is what stops it being an open mail relay. Rate-limited to 3/hour through a counter document in `contactRateLimits` (a single doc, not a `where(uid) + where(createdAt >=)` query, which would need a composite index that fails on first use in production). The submission is written to `contactSubmissions` **before** the send, so a message survives a provider outage.
 - `POST { action: 'broadcast' }` — admin only. Modes `user`/`tier`/`all`, capped at `MAX_BROADCAST_RECIPIENTS`, with a `confirm: 'ALL'` interlock on the all-users mode.
-- `GET` — the nightly unread-report digest, guarded by `CRON_SECRET` and scheduled in `vercel.json`. Idempotent per day via a date stamp in `cronRuns/report_digest`, and sends nothing when the count is zero.
+- `GET` — the single scheduled entry point, guarded by `CRON_SECRET` and scheduled in `vercel.json`. Runs two once-daily jobs: it drains the mail queue first, then sends the unread-report digest. Both are idempotent on their own date stamp in `cronRuns`, and the digest sends nothing when the count is zero. The queue drains first because it is the one with a hard provider cap behind it and should not be skipped if the digest fails.
 
 Supporting modules:
 
@@ -77,6 +77,7 @@ Supporting modules:
 - `lib/email-copy.ts` — resolves copy per locale with a three-layer, per-string merge: requested locale → `en-US` → the bundled `EMAIL_COPY_BASE` (pt-PT). `EMAIL_COPY_BASE` must stay in sync with the `email.*` subtree of the frontend's pt-PT locale file; they are two copies of the same strings in two repos.
 - `lib/email-templates.ts` — one builder per notification, table-based with fully inline styles (mail clients strip `<style>`), each returning html **and** text.
 - `lib/notification-prefs.ts` — `transactional` is always deliverable and short-circuits without a Firestore read; `announcements` and `reminders` are opt-out for email and opt-**in** for push.
+- `lib/mail-queue.ts` — a Firestore outbox for bulk mail. **Broadcasts never send directly**; they enqueue, and the cron releases `DAILY_SEND_CAP` (75) a day. Resend's free tier is 100/day and the 25 held back is headroom for transactional mail, which bypasses the queue entirely. The daily allowance lives in a counter document (`cronRuns/mail_queue`) rather than being inferred from the queue, so a retried or manually-triggered run cannot send a second batch on the same day. `sendBatchSafe` reports a count and not *which* messages were accepted, so a partial acceptance marks the tail `failed` — visible in the admin panel and requeueable — rather than claiming success.
 - `lib/push.ts` — FCM web push over the existing Firebase credentials (no separate key; the frontend needs the matching VAPID key). Prunes dead tokens on send. Note `sendPushSafe` currently has no production caller — push is wired for broadcasts only.
 
 Mail is sent inline from `api/auth.ts` (welcome, new users only), `api/stripe.ts` (four webhook cases), and `lib/delete-user-account.ts` (before any data is destroyed).

@@ -25,6 +25,7 @@ import { sendPushToTokens, isPushSubscribed } from '../lib/push';
 import { getEmailCopy } from '../lib/email-copy';
 import { contactFormEmail, broadcastEmail, reportDigestEmail } from '../lib/email-templates';
 import { normalizePrefs } from '../lib/notification-prefs';
+import { enqueueEmails, drainQueue, pendingCount, DAILY_SEND_CAP } from '../lib/mail-queue';
 import type { VercelRequest, VercelResponse } from '../lib/types';
 
 const VALID_CONTACT_SUBJECTS = ['general', 'support', 'feedback', 'business', 'bug'];
@@ -218,7 +219,20 @@ async function handleBroadcast(req: VercelRequest, res: VercelResponse, uid: str
     recipients = snapshot.docs.map((doc) => ({ uid: doc.id, data: doc.data() }));
   }
 
-  const stats = { total: recipients.length, emailSent: 0, emailSkipped: 0, pushSent: 0, pushSkipped: 0 };
+  // Ties every row this broadcast produces together, so the admin panel can
+  // show one announcement's progress rather than a flat list of messages.
+  const batchId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const stats = {
+    total: recipients.length,
+    batchId,
+    emailQueued: 0,
+    emailSkipped: 0,
+    queueDepth: 0,
+    dailyCap: DAILY_SEND_CAP,
+    pushSent: 0,
+    pushSkipped: 0,
+  };
 
   if (sendEmail) {
     // Build every message first, then hand the whole list to sendBatchSafe,
@@ -240,12 +254,17 @@ async function handleBroadcast(req: VercelRequest, res: VercelResponse, uid: str
       messages.push(broadcastEmail(copy, data.email as string, subject, body));
     }
 
-    stats.emailSent = await sendBatchSafe(messages, {
+    // Queued, not sent. Every broadcast goes through the outbox regardless
+    // of size, so "did it send?" has one answer rather than one that depends
+    // on the recipient count. lib/mail-queue.ts releases DAILY_SEND_CAP a day
+    // on the existing cron; a broadcast larger than that simply takes more
+    // days rather than being partly dropped by the provider.
+    stats.emailQueued = await enqueueEmails(messages, {
       template: 'broadcast',
-      category: 'announcements',
+      batchId,
     });
-    // Whatever the provider didn't accept is a skip, not a silent success.
-    stats.emailSkipped += messages.length - stats.emailSent;
+    stats.queueDepth = await pendingCount();
+    stats.dailyCap = DAILY_SEND_CAP;
   }
 
   if (sendPush) {
@@ -288,15 +307,7 @@ async function handleBroadcast(req: VercelRequest, res: VercelResponse, uid: str
  * Sends nothing when the count is zero — a nightly "you have 0 reports" mail
  * trains you to ignore the ones that matter.
  */
-async function handleReportDigest(req: VercelRequest, res: VercelResponse, elapsed: () => number) {
-  const secret = process.env.CRON_SECRET;
-  const authHeader = req.headers['authorization'];
-
-  if (!secret || authHeader !== `Bearer ${secret}`) {
-    logWarn('cron_unauthorized', 'email', { statusCode: 401, durationMs: elapsed() });
-    return errorResponse(res, 'Unauthorized', 401);
-  }
-
+async function handleReportDigest(elapsed: () => number) {
   // Vercel cron delivery is best-effort and can fire the same run twice.
   // A date stamp makes a duplicate invocation a no-op rather than a second
   // identical email.
@@ -306,7 +317,7 @@ async function handleReportDigest(req: VercelRequest, res: VercelResponse, elaps
 
   if (lastRun === today) {
     logInfo('cron_already_ran', 'email', { job: 'report_digest', today, durationMs: elapsed() });
-    return successResponse(res, { skipped: 'already ran today' });
+    return { skipped: 'already ran today' as const };
   }
 
   const snapshot = await db
@@ -322,7 +333,7 @@ async function handleReportDigest(req: VercelRequest, res: VercelResponse, elaps
 
   if (unreadCount === 0) {
     logInfo('report_digest_skipped', 'email', { reason: 'no unread reports', durationMs: elapsed() });
-    return successResponse(res, { unreadCount, sent: false });
+    return { unreadCount, sent: false };
   }
 
   const inbox = process.env.CONTACT_INBOX;
@@ -330,7 +341,7 @@ async function handleReportDigest(req: VercelRequest, res: VercelResponse, elaps
     await reportMessage('contact_inbox_unset', 'email', 'CONTACT_INBOX is not set', {
       statusCode: 500, durationMs: elapsed(),
     });
-    return errorResponse(res, 'Digest could not be sent', 500);
+    return { unreadCount, sent: false, error: 'CONTACT_INBOX is not set' };
   }
 
   const byCategory: Record<string, number> = {};
@@ -348,7 +359,40 @@ async function handleReportDigest(req: VercelRequest, res: VercelResponse, elaps
     unreadCount, delivered: !!result, statusCode: 200, durationMs: elapsed(),
   });
 
-  return successResponse(res, { unreadCount, sent: !!result });
+  return { unreadCount, sent: !!result };
+}
+
+/**
+ * The single scheduled entry point, invoked once a day by the cron in
+ * vercel.json. Vercel sends CRON_SECRET as a Bearer token; there is no
+ * Firebase session on a cron request, which is why this is checked before
+ * anything else and why GET bypasses verifyAuth entirely.
+ *
+ * Two jobs run here rather than two crons because both are once-daily and
+ * both are idempotent on their own date stamp. The queue drains first: it is
+ * the one with a hard provider cap behind it, and it should not be skipped
+ * because the digest happened to fail.
+ */
+async function handleCron(req: VercelRequest, res: VercelResponse, elapsed: () => number) {
+  const secret = process.env.CRON_SECRET;
+  const authHeader = req.headers['authorization'];
+
+  if (!secret || authHeader !== `Bearer ${secret}`) {
+    logWarn('cron_unauthorized', 'email', { statusCode: 401, durationMs: elapsed() });
+    return errorResponse(res, 'Unauthorized', 401);
+  }
+
+  const queue = await drainQueue();
+  const digest = await handleReportDigest(elapsed);
+
+  logInfo('cron_complete', 'email', {
+    queueSent: queue.sent,
+    queuePending: queue.pending,
+    statusCode: 200,
+    durationMs: elapsed(),
+  });
+
+  return successResponse(res, { queue, digest });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -365,10 +409,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CRON_SECRET, not a Firebase token.
   if (req.method === 'GET') {
     try {
-      return await handleReportDigest(req, res, elapsed);
+      return await handleCron(req, res, elapsed);
     } catch (err: any) {
-      await reportError('report_digest_error', 'email', err, { statusCode: 500, durationMs: elapsed() });
-      return errorResponse(res, 'Digest failed', 500);
+      await reportError('cron_error', 'email', err, { statusCode: 500, durationMs: elapsed() });
+      return errorResponse(res, 'Scheduled job failed', 500);
     }
   }
 

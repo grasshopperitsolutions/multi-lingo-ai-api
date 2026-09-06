@@ -17,9 +17,12 @@ function applyFieldValues(
   const result = { ...base };
   for (const [key, value] of Object.entries(patch)) {
     const remove = (value as any)?.__arrayRemove as unknown[] | undefined;
+    const increment = (value as any)?.__increment as number | undefined;
     if (remove) {
       const current = Array.isArray(result[key]) ? (result[key] as unknown[]) : [];
       result[key] = current.filter((item) => !remove.includes(item));
+    } else if (typeof increment === 'number') {
+      result[key] = (typeof result[key] === 'number' ? (result[key] as number) : 0) + increment;
     } else {
       result[key] = value;
     }
@@ -69,11 +72,26 @@ function makeQuery(path: string, filters: Array<{ field: string; op: string; val
     startAfter(_val: any) {
       return makeQuery(path, filters, orderField, orderDir, limitN);
     },
+    /** Aggregate query — lib/mail-queue.ts counts pending rows with this. */
+    count() {
+      return {
+        get: async () => {
+          const snapshot = await query.get();
+          return { data: () => ({ count: snapshot.size }) };
+        },
+      };
+    },
     async get() {
       const map = collectionMap(path);
       let docs = [...map.entries()].map(([id, data]) => ({ id, data }));
       for (const f of filters) {
         docs = docs.filter((d) => applyOp((d.data as any)[f.field], f.op, f.value));
+      }
+      if (!orderField) {
+        // Firestore's implicit order is by document id (__name__). The mail
+        // queue relies on that instead of an orderBy, so the fake has to
+        // reproduce it rather than hand back Map insertion order.
+        docs.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       }
       if (orderField) {
         docs.sort((a, b) => {
@@ -169,6 +187,7 @@ function makeCollectionRef(path: string): any {
     where: q.where,
     orderBy: q.orderBy,
     limit: q.limit,
+    count: q.count,
     get: q.get,
   };
 }
@@ -183,6 +202,12 @@ export const db: any = {
   batch: () => {
     const ops: Array<() => Promise<void>> = [];
     return {
+      set(ref: any, data: Record<string, unknown>, opts?: { merge?: boolean }) {
+        ops.push(() => ref.set(data, opts));
+      },
+      update(ref: any, data: Record<string, unknown>) {
+        ops.push(() => ref.update(data));
+      },
       delete(ref: any) {
         ops.push(() => ref.delete());
       },
@@ -197,6 +222,7 @@ export const FieldValue = {
   serverTimestamp: () => SERVER_TIMESTAMP,
   /** Sentinel resolved by applyFieldValues() on set(merge)/update. */
   arrayRemove: (...values: unknown[]) => ({ __arrayRemove: values }),
+  increment: (by: number) => ({ __increment: by }),
 };
 
 export const sendEachForMulticast = vi.fn(async ({ tokens }: { tokens: string[] }) => ({

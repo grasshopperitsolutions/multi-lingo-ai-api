@@ -103,6 +103,10 @@ export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
   // policy the collection-query path would have handed the lot to any
   // signed-in caller, anonymous guests included.
   contactSubmissions: { read: 'admin', write: 'admin' },
+  // The bulk-mail outbox. Rows hold recipient addresses and rendered message
+  // bodies, so this is admin-read like contactSubmissions rather than merely
+  // server-written.
+  mailQueue: { read: 'admin', write: 'admin' },
   contactRateLimits: { read: 'admin', write: 'admin' },
   stripeEvents: { read: 'admin', write: 'admin' },
   cronRuns: { read: 'admin', write: 'admin' },
