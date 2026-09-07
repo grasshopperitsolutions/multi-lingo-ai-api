@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from './types';
-import { isAdmin, requireAdmin } from './require-admin';
+import { isAdmin, requireAdmin, requireTier } from './require-admin';
 import { resolveCollectionPolicy } from './collection-policies';
 
 /**
@@ -114,20 +114,42 @@ export async function authorizeUsersDocAccess(
  * e.g. `files`) is present, and a document with neither field set is
  * treated as unowned — only an admin may write to it. On denial, writes
  * the 403 response.
+ *
+ * `docId` is needed for the 'own-doc-id' policy, which is the only one that
+ * cares which document is being written rather than what is already in it.
  */
 export async function authorizeGenericDocWrite(
   segments: string[],
   docData: Record<string, unknown> | undefined,
   uid: string,
   req: VercelRequest,
-  res: VercelResponse
+  res: VercelResponse,
+  docId?: string
 ): Promise<boolean> {
   const policy = resolveCollectionPolicy(segments);
+
+  // Applies on top of whichever write rule follows, so a tier-gated
+  // collection is closed to the wrong tier even where the rule below would
+  // otherwise allow the write (a brand-new document, say).
+  if (policy.writeTiers && !(await requireTier(uid, policy.writeTiers, req, res))) {
+    return false;
+  }
 
   if (policy.write === 'authenticated') {
     return true;
   }
   if (policy.write === 'admin') {
+    return requireAdmin(uid, req, res);
+  }
+
+  // policy.write === 'own-doc-id': the document id must be the caller's uid.
+  // Unlike owner-or-admin below, this is checked for creates as well, which
+  // is the entire point — it is what stops someone claiming another user's
+  // slot in a public self-service collection before they get there.
+  if (policy.write === 'own-doc-id') {
+    if (docId !== undefined && docId === uid) {
+      return true;
+    }
     return requireAdmin(uid, req, res);
   }
 

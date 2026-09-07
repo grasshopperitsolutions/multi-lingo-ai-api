@@ -7,6 +7,7 @@ import { db, FieldValue } from '../lib/firebase-admin';
 import { stripe } from '../lib/stripe';
 import { logInfo, logWarn, startTimer } from '../lib/logger';
 import { reportError } from '../lib/sentry';
+import { syncTutorPublication } from '../lib/tutors';
 import { sendEmailSafe } from '../lib/email';
 import { getEmailCopy } from '../lib/email-copy';
 import {
@@ -422,6 +423,10 @@ async function handleWebhook(
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
 
+      // The directory cannot check a tutor's tier itself — reading `users` is
+      // admin-only — so every tier change has to push the result at it.
+      await syncTutorPublication(uid, tier);
+
       logInfo('stripe_webhook_activated', 'stripe', { uid, tier, subscriptionId, durationMs: elapsed() });
 
       const recipient = await recipientFor(uid);
@@ -465,6 +470,8 @@ async function handleWebhook(
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
 
+      await syncTutorPublication(uid, tier);
+
       logInfo('stripe_webhook_updated', 'stripe', { uid, tier, status: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end, durationMs: elapsed() });
 
       // Only on the transition into "cancellation scheduled". Emailing on
@@ -495,6 +502,11 @@ async function handleWebhook(
         cancelAtPeriodEnd: false,
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
+
+      // Dropped to explorer: the profile is hidden, not deleted, so
+      // resubscribing brings the description and links back rather than
+      // making the tutor write them again.
+      await syncTutorPublication(uid, 'explorer');
 
       logInfo('stripe_webhook_canceled', 'stripe', { uid, durationMs: elapsed() });
 

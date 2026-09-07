@@ -218,6 +218,94 @@ describe('GET /api/firestore — collection queries respect document ownership',
   });
 });
 
+describe('tutors — public read, uid-locked and tier-gated writes', () => {
+  // The default owner-or-admin policy lets any signed-in caller CREATE a
+  // document at any id that does not exist yet, and become its owner. On a
+  // public self-service directory that is a squatting hole: anyone could
+  // claim tutors/<someone else's uid> and lock the real user out of their
+  // own slot. Hence the 'own-doc-id' write policy.
+  beforeEach(() => {
+    __testUtils.seedDoc('users', 'alice', { email: 'alice@example.com', subscriptionTier: 'maestro' });
+  });
+
+  const writeTutor = (token: string, docId: string) =>
+    createMockReqRes({
+      method: 'POST',
+      headers: bearer(token),
+      body: { collection: 'tutors', id: docId, data: { displayName: 'Alice' } },
+    });
+
+  it('lets a qualifying user publish their own profile', async () => {
+    const { req, res } = writeTutor(TOKEN_ALICE, 'alice');
+    await handler(req, res);
+    expect(res.statusCode).toBe(201);
+  });
+
+  it("refuses to let a user create someone else's profile, even though it does not exist yet", async () => {
+    const { req, res } = writeTutor(TOKEN_ALICE, 'bob');
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(403);
+    expect(__testUtils.getDoc('tutors', 'bob')).toBeUndefined();
+  });
+
+  it("refuses to let a user overwrite someone else's existing profile", async () => {
+    __testUtils.seedDoc('tutors', 'bob', { displayName: 'Bob', createdBy: 'bob' });
+
+    const { req, res } = writeTutor(TOKEN_ALICE, 'bob');
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(403);
+    expect(__testUtils.getDoc('tutors', 'bob')?.displayName).toBe('Bob');
+  });
+
+  it('refuses a tier that is not allowed to be listed', async () => {
+    __testUtils.seedDoc('users', 'alice', { email: 'alice@example.com', subscriptionTier: 'voyager' });
+
+    const { req, res } = writeTutor(TOKEN_ALICE, 'alice');
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(403);
+    expect(__testUtils.getDoc('tutors', 'alice')).toBeUndefined();
+  });
+
+  it('lets an admin write any tutor document, for moderation', async () => {
+    const { req, res } = writeTutor(TOKEN_ADMIN, 'bob');
+    await handler(req, res);
+    expect(res.statusCode).toBe(201);
+  });
+
+  it('is queryable by any signed-in caller — the directory is the point', async () => {
+    __testUtils.seedDoc('tutors', 'bob', { displayName: 'Bob', createdBy: 'bob' });
+
+    const { req, res } = createMockReqRes({
+      method: 'GET',
+      headers: bearer(TOKEN_ALICE),
+      query: { collection: 'tutors', filters: '[]' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    // A 'public' read policy skips filterQueryResultsByOwnership, so another
+    // user's profile is returned rather than filtered out as it would be
+    // under the default policy.
+    expect(res.body.data.documents).toHaveLength(1);
+  });
+
+  it('refuses a non-admin reading tutor applications', async () => {
+    __testUtils.seedDoc('appConfig/config/tutorApplications', 'a1', { instagram: '@someone' });
+
+    const { req, res } = createMockReqRes({
+      method: 'GET',
+      headers: bearer(TOKEN_ALICE),
+      query: { collection: 'appConfig/config/tutorApplications', filters: '[]' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(403);
+  });
+});
+
 describe('POST /api/firestore — self-escalation and doc-hijack chain (finding 1.4)', () => {
   it("strips subscriptionTier when a user POSTs to their own users/{uid} doc — can't self-promote to admin", async () => {
     const { req, res } = createMockReqRes({

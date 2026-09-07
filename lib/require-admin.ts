@@ -21,6 +21,46 @@ export async function isAdmin(uid: string): Promise<boolean> {
 }
 
 /**
+ * The caller's subscription tier, which doubles as their role. Undefined when
+ * the user document is missing — treated as "no tier", never as a default.
+ */
+export async function getUserTier(uid: string): Promise<string | undefined> {
+  const doc = await db.collection('users').doc(uid).get();
+  return doc.exists ? (doc.data()?.subscriptionTier as string | undefined) : undefined;
+}
+
+/**
+ * Tier gate for a request: writes a 403 and returns false unless the caller's
+ * subscriptionTier is in `allowed`.
+ *
+ * Safe to gate on because `subscriptionTier` is in
+ * ALWAYS_PROTECTED_USER_FIELDS (lib/firestore-helpers.ts) — it can only be set
+ * by the Stripe webhook or an admin edit, never by the user themselves, so a
+ * caller cannot promote their way past this.
+ */
+export async function requireTier(
+  uid: string,
+  allowed: readonly string[],
+  req: VercelRequest,
+  res: VercelResponse
+): Promise<boolean> {
+  const tier = await getUserTier(uid);
+
+  if (!tier || !allowed.includes(tier)) {
+    logWarn('tier_access_denied', 'require-admin', {
+      uid,
+      method: req.method,
+      tier: tier ?? 'none',
+      allowed: allowed.join(','),
+    });
+    errorResponse(res, 'Your plan does not allow this', 403);
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * Admin gate for a request: writes a 403 response and returns false when
  * the caller isn't an admin.
  */

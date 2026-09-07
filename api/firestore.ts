@@ -115,7 +115,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // creating a fresh document — only overwriting one that already
           // exists is ownership-checked, closing the hole where POSTing a
           // known/guessed id let anyone hijack an existing document.
-          const authorized = await authorizeGenericDocWrite(segments, existingData, uid, req, res);
+          const authorized = await authorizeGenericDocWrite(segments, existingData, uid, req, res, id);
           if (!authorized) return;
         }
 
@@ -416,7 +416,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // (set by this endpoint's own POST) or userId (set by
           // /api/storage). A document with neither field fails closed —
           // previously it silently passed the check.
-          const authorized = await authorizeGenericDocWrite(segments, doc.data(), uid, req, res);
+          const authorized = await authorizeGenericDocWrite(segments, doc.data(), uid, req, res, id as string);
           if (!authorized) return;
         }
 
@@ -496,7 +496,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const authResult = await authorizeUsersDocAccess(subOwner, uid, req, res);
           if (!authResult.ok) return;
         } else {
-          const authorized = await authorizeGenericDocWrite(segments, doc.data(), uid, req, res);
+          const authorized = await authorizeGenericDocWrite(segments, doc.data(), uid, req, res, id as string);
           if (!authorized) return;
         }
 

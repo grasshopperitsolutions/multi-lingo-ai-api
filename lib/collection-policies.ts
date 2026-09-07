@@ -21,6 +21,16 @@
  *                                    genuinely private data (e.g. `files`)
  *                                    and is what every unlisted collection
  *                                    falls back to.
+ * - 'own-doc-id'    (write only) — the document id must equal the caller's
+ *                                   uid. Stricter than 'owner-or-admin',
+ *                                   which lets any signed-in caller CREATE a
+ *                                   document at any id that doesn't exist yet
+ *                                   and become its owner. For a self-service
+ *                                   public collection like `tutors` that rule
+ *                                   is a squatting hole: anyone could claim
+ *                                   tutors/<someone else's uid> and lock the
+ *                                   real user out of their own slot in a
+ *                                   publicly readable directory.
  * - 'admin'         (read)       — admin only, on BOTH the single-document
  *                                   and the collection-query read paths.
  *                                   Needed because 'owner-or-admin' does not
@@ -39,11 +49,19 @@
  */
 
 export type ReadPolicy = 'public' | 'authenticated' | 'owner-or-admin' | 'admin';
-export type WritePolicy = 'authenticated' | 'admin' | 'owner-or-admin';
+export type WritePolicy = 'authenticated' | 'admin' | 'owner-or-admin' | 'own-doc-id';
 
 export interface CollectionPolicy {
   read: ReadPolicy;
   write: WritePolicy;
+  /**
+   * Optional extra requirement on top of `write`: the caller's
+   * subscriptionTier must be one of these. Left undefined, any tier passes.
+   *
+   * Safe to gate on because subscriptionTier is in
+   * ALWAYS_PROTECTED_USER_FIELDS — a user cannot set their own.
+   */
+  writeTiers?: readonly string[];
 }
 
 /** Applied to any collection path that doesn't match a row below. */
@@ -85,6 +103,12 @@ export const EXACT_PATH_POLICIES: Record<string, CollectionPolicy> = {
   // somebody else's report. Read is admin-only: reports are moderation data.
   'appConfig/config/reports': { read: 'admin', write: 'owner-or-admin' },
 
+  // Applications to become a listed tutor. Same shape and same reasoning as
+  // reports above: a user files their own, and only an admin reads them back.
+  // Approval is not a field here — an admin grants the applicant the `vip`
+  // tier in the Users panel, which is what the tutors policy below gates on.
+  'appConfig/config/tutorApplications': { read: 'admin', write: 'owner-or-admin' },
+
   'appConfig/config/features': { read: 'public', write: 'admin' },
   'appConfig/config/tiersConfig': { read: 'public', write: 'admin' },
 };
@@ -110,6 +134,13 @@ export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
   contactRateLimits: { read: 'admin', write: 'admin' },
   stripeEvents: { read: 'admin', write: 'admin' },
   cronRuns: { read: 'admin', write: 'admin' },
+
+  // Public tutor directory. Readable by anyone with a session, guests
+  // included, because being findable is the whole point. Writes are locked to
+  // the caller's own uid AND to the tiers allowed to be listed — see the
+  // 'own-doc-id' note at the top of this file for why 'owner-or-admin' is not
+  // enough on a public, self-service collection.
+  tutors: { read: 'public', write: 'own-doc-id', writeTiers: ['maestro', 'vip', 'admin'] },
 
   // Shared, cache-first content pools: any signed-in user reads existing
   // entries and writes newly AI-generated ones back for everyone to reuse.

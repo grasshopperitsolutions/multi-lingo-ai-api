@@ -4,6 +4,7 @@ import { logWarn } from './logger';
 import { sendEmailSafe } from './email';
 import { getEmailCopy } from './email-copy';
 import { accountDeletedEmail } from './email-templates';
+import { deleteTutorData } from './tutors';
 
 /**
  * Recursively deletes all sub-collections under a Firestore document.
@@ -25,8 +26,9 @@ async function deleteSubCollections(docPath: string): Promise<void> {
 
 /**
  * Permanently deletes a user's entire account — Stripe subscription,
- * Firestore doc + sub-collections, owned `files` docs, Storage uploads, and
- * finally the Firebase Auth record. Shared by the self-service delete
+ * Firestore doc + sub-collections, owned `files` docs, the public tutor
+ * profile and applications, Storage uploads, and finally the Firebase Auth
+ * record. Shared by the self-service delete
  * (DELETE /api/auth) and the admin-driven delete (DELETE /api/admin-users)
  * so both stay in lockstep.
  */
@@ -88,6 +90,14 @@ export async function deleteUserAccount(uid: string): Promise<void> {
       reason: firestoreErr?.message,
     });
   }
+
+  // 3b. Remove the public tutor profile and any applications. This one is
+  //     not merely tidiness: `tutors` is publicly readable and the document
+  //     carries a name, email and phone number, so leaving it behind means
+  //     personal data outliving the account it belonged to — and nobody but
+  //     an admin could remove it, since the editor is keyed to a uid that no
+  //     longer exists.
+  await deleteTutorData(uid);
 
   // 4. Delete all user-uploaded files from Cloud Storage (best-effort, non-fatal)
   try {
