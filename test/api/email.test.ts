@@ -19,6 +19,7 @@ import handler from '../../api/email';
 
 const TOKEN_ALICE = 'token-alice';
 const TOKEN_ADMIN = 'token-admin';
+const TOKEN_GUEST = 'token-guest';
 
 const CONTACT_BODY = {
   action: 'contact',
@@ -34,6 +35,12 @@ beforeEach(() => {
   pushMock.sendPushToTokens.mockClear();
 
   __testUtils.setValidToken(TOKEN_ALICE, { uid: 'alice' });
+  // A guest on the public contact form: signed in, but anonymously, so the
+  // uid is a throwaway minted for that browser rather than an account.
+  __testUtils.setValidToken(TOKEN_GUEST, {
+    uid: 'anon-9f2',
+    firebase: { sign_in_provider: 'anonymous' },
+  });
   __testUtils.setValidToken(TOKEN_ADMIN, { uid: 'admin1' });
   __testUtils.seedDoc('users', 'alice', { email: 'alice@test.local', subscriptionTier: 'explorer' });
   __testUtils.seedDoc('users', 'admin1', { email: 'admin@test.local', subscriptionTier: 'admin' });
@@ -88,6 +95,30 @@ describe('POST /api/email — contact', () => {
     const stored = Object.values(__testUtils.dumpCollection('contactSubmissions')) as any[];
     expect(stored).toHaveLength(1);
     expect(stored[0].message).toBe('My streak reset unexpectedly.');
+  });
+
+  it("stamps a signed-in sender with their real uid, so they're findable in Admin", async () => {
+    const { req, res } = post(TOKEN_ALICE, CONTACT_BODY);
+    await handler(req, res);
+
+    const stored = Object.values(__testUtils.dumpCollection('contactSubmissions')) as any[];
+    expect(stored[0].senderId).toBe('alice');
+    expect(stored[0].isGuest).toBe(false);
+    expect(emailUtils.sentFor('contact')[0].message.text).toContain('User ID: alice');
+  });
+
+  it('stamps an anonymous sender as "guest" rather than a throwaway uid', async () => {
+    const { req, res } = post(TOKEN_GUEST, CONTACT_BODY);
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    const stored = Object.values(__testUtils.dumpCollection('contactSubmissions')) as any[];
+    expect(stored[0].senderId).toBe('guest');
+    expect(stored[0].isGuest).toBe(true);
+    // The real session id is still recorded — it's what the rate limiter keys
+    // on and the only trace back to the request.
+    expect(stored[0].uid).toBe('anon-9f2');
+    expect(emailUtils.sentFor('contact')[0].message.text).toContain('User ID: guest');
   });
 
   it.each([

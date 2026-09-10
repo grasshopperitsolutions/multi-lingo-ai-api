@@ -4,7 +4,7 @@ import { createMockReqRes } from '../helpers/httpMocks';
 vi.mock('../../lib/firebase-admin', () => import('../helpers/mockFirebaseAdmin'));
 
 import { __testUtils } from '../helpers/mockFirebaseAdmin';
-import { verifyAuth } from '../../lib/verify-auth';
+import { verifyAuth, verifyAuthSession } from '../../lib/verify-auth';
 
 beforeEach(() => {
   __testUtils.reset();
@@ -39,5 +39,31 @@ describe('verifyAuth', () => {
     expect(uid).toBeNull();
     expect(res.statusCode).toBe(401);
     expect(res.body.error).toBe('Invalid or expired token');
+  });
+});
+
+describe('verifyAuthSession', () => {
+  it('reports a normal sign-in as not anonymous', async () => {
+    __testUtils.setValidToken('good-token', { uid: 'alice', firebase: { sign_in_provider: 'google.com' } });
+    const { req, res } = createMockReqRes({ headers: { authorization: 'Bearer good-token' } });
+    expect(await verifyAuthSession(req, res)).toEqual({ uid: 'alice', isAnonymous: false });
+  });
+
+  it('flags an anonymous session — its uid is a browser, not a person', async () => {
+    __testUtils.setValidToken('guest-token', { uid: 'anon-1', firebase: { sign_in_provider: 'anonymous' } });
+    const { req, res } = createMockReqRes({ headers: { authorization: 'Bearer guest-token' } });
+    expect(await verifyAuthSession(req, res)).toEqual({ uid: 'anon-1', isAnonymous: true });
+  });
+
+  it('treats a token with no provider claim as not anonymous', async () => {
+    __testUtils.setValidToken('bare-token', { uid: 'bob' });
+    const { req, res } = createMockReqRes({ headers: { authorization: 'Bearer bare-token' } });
+    expect(await verifyAuthSession(req, res)).toEqual({ uid: 'bob', isAnonymous: false });
+  });
+
+  it('returns null and 401 for an invalid token', async () => {
+    const { req, res } = createMockReqRes({ headers: { authorization: 'Bearer nope' } });
+    expect(await verifyAuthSession(req, res)).toBeNull();
+    expect(res.statusCode).toBe(401);
   });
 });

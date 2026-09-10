@@ -15,7 +15,7 @@
 
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
-import { verifyAuth } from '../lib/verify-auth';
+import { verifyAuthSession, type AuthSession } from '../lib/verify-auth';
 import { requireAdmin } from '../lib/require-admin';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { logInfo, logWarn, startTimer } from '../lib/logger';
@@ -71,7 +71,14 @@ async function pooled<T>(items: T[], size: number, worker: (item: T) => Promise<
 // contact
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function handleContact(req: VercelRequest, res: VercelResponse, uid: string, elapsed: () => number) {
+async function handleContact(req: VercelRequest, res: VercelResponse, session: AuthSession, elapsed: () => number) {
+  const { uid, isAnonymous } = session;
+
+  // What goes in the email and the stored submission. A signed-in user gets
+  // their real uid, which is what makes them findable in the Users admin; an
+  // anonymous session's uid is a throwaway minted for that browser and would
+  // read as a real account that can't be looked up, so it says so instead.
+  const senderId = isAnonymous ? 'guest' : uid;
   const name = asString(req.body?.name);
   const email = asString(req.body?.email);
   const phone = asString(req.body?.phone);
@@ -132,13 +139,18 @@ async function handleContact(req: VercelRequest, res: VercelResponse, uid: strin
   // read out of Firestore, which is the whole reason the old fake-submit was
   // so damaging — those messages left no trace anywhere.
   const submissionRef = await db.collection('contactSubmissions').add({
-    uid, name, email, phone: phone || null, subject, message,
+    // `uid` stays the real session id (anonymous included) — it's what the
+    // rate limiter keys on and the only way to trace a submission back to a
+    // request. `senderId`/`isGuest` are the human-facing answer to "who sent
+    // this, and can I find them?".
+    uid, senderId, isGuest: isAnonymous,
+    name, email, phone: phone || null, subject, message,
     createdAt: FieldValue.serverTimestamp(),
     emailId: null,
   });
 
   const result = await sendEmailSafe(
-    contactFormEmail(inbox, { name, email, phone, subject, message, uid }),
+    contactFormEmail(inbox, { name, email, phone, subject, message, uid: senderId }),
     { template: 'contact', category: 'transactional' }
   );
 
@@ -147,7 +159,7 @@ async function handleContact(req: VercelRequest, res: VercelResponse, uid: strin
   }
 
   logInfo('contact_submitted', 'email', {
-    uid, subject, delivered: !!result, statusCode: 200, durationMs: elapsed(),
+    uid, isGuest: isAnonymous, subject, delivered: !!result, statusCode: 200, durationMs: elapsed(),
   });
 
   // The message is stored either way, so the user is told it was received
@@ -423,15 +435,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Requiring a verified session — anonymous included, which is what the
   // public contact form uses via getTokenOrAnonymous() — is what stops this
   // endpoint being an open mail relay.
-  const uid = await verifyAuth(req, res);
-  if (!uid) return;
+  const session = await verifyAuthSession(req, res);
+  if (!session) return;
+  const uid = session.uid;
 
   const action = asString(req.body?.action);
 
   try {
     switch (action) {
       case 'contact':
-        return await handleContact(req, res, uid, elapsed);
+        return await handleContact(req, res, session, elapsed);
       case 'broadcast':
         return await handleBroadcast(req, res, uid, elapsed);
       default:
