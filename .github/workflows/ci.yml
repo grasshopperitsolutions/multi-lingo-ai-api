@@ -5,6 +5,11 @@ on:
   pull_request:
     branches-ignore:
       - master
+  # The email copy check below compares this repo against the frontend's
+  # master. A frontend change that lands first leaves this repo behind
+  # without any push here to notice it, so it is also run once a day.
+  schedule:
+    - cron: "17 7 * * *"
 
 jobs:
   validate:
@@ -25,6 +30,16 @@ jobs:
 
       - name: TypeScript check
         run: npm run typecheck
+
+      # Blocking, and the only thing standing between two repos and two
+      # different versions of the same email. lib/email-copy.base.ts is
+      # generated from the frontend's pt-PT file; if it is out of date this
+      # prints the offending strings. Fix with `npm run sync:email-copy`.
+      #
+      # Unauthenticated because the frontend repo is public. If it goes
+      # private this needs a read-only token passed to the fetch.
+      - name: Email copy matches the frontend
+        run: npm run check:email-copy
 
       - name: Dependency vulnerability audit
         run: npm audit --omit=dev --audit-level=high

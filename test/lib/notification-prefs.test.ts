@@ -27,7 +27,9 @@ describe('normalizePrefs', () => {
     expect(prefs.announcements.email).toBe(false);
     // Untouched keys keep their default rather than becoming undefined.
     expect(prefs.announcements.push).toBe(false);
-    expect(prefs.reminders.email).toBe(true);
+    // Reminders are push-only: nothing sends them by email, so the channel
+    // defaults off rather than promising a delivery that never happens.
+    expect(prefs.reminders.email).toBe(false);
   });
 
   it('ignores non-boolean and malformed values', () => {
@@ -38,7 +40,7 @@ describe('normalizePrefs', () => {
     });
     expect(prefs.announcements.email).toBe(true);
     expect(prefs.announcements.push).toBe(false);
-    expect(prefs.reminders.email).toBe(true);
+    expect(prefs.reminders.email).toBe(false);
     expect(prefs).not.toHaveProperty('unknownCategory');
   });
 

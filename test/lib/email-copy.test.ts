@@ -29,7 +29,7 @@ describe('renderTemplate', () => {
 });
 
 describe('getEmailCopy', () => {
-  it('returns the bundled base copy for pt-PT without reading Firestore', async () => {
+  it('returns the bundled base copy for pt-PT when no document overrides it', async () => {
     await expect(getEmailCopy(BASE_LOCALE)).resolves.toBe(EMAIL_COPY_BASE);
     // 'pt' is normalized to the base locale rather than treated as missing.
     await expect(getEmailCopy('pt')).resolves.toBe(EMAIL_COPY_BASE);
@@ -132,7 +132,7 @@ describe('getEmailCopy — three-layer fallback', () => {
     expect(copy.welcome.body).toBe(EMAIL_COPY_BASE.welcome.body);
   });
 
-  it('still short-circuits pt-PT to the bundled source', async () => {
+  it('does not let the en-US document leak into Portuguese', async () => {
     await seedLocale(FALLBACK_LOCALE, ENGLISH);
     await expect(getEmailCopy(BASE_LOCALE)).resolves.toBe(EMAIL_COPY_BASE);
   });
@@ -151,4 +151,47 @@ describe('getEmailCopy — three-layer fallback', () => {
       expect(copy.welcome.subject).toBe('Welcome');
     }
   );
+});
+
+
+describe('getEmailCopy — pt-PT comes from the repo, never from Firestore', () => {
+  // There is no pt-PT document in Firestore, on purpose. One existed as an
+  // abandoned partial seed, the admin email editor used to write to it, and
+  // nothing read it. Rather than keep a third copy of these strings in a
+  // place no pull request can be gated on, it was deleted — so the guard that
+  // matters now is that no code path starts reading one again.
+
+  it('ignores a pt-PT document even if one is put back', async () => {
+    await seedLocale(BASE_LOCALE, { welcome: { subject: 'Escrito à mão no Firestore' } });
+
+    // Not a merge, not a fallback: the same object, untouched.
+    await expect(getEmailCopy(BASE_LOCALE)).resolves.toBe(EMAIL_COPY_BASE);
+    await expect(getEmailCopy('pt')).resolves.toBe(EMAIL_COPY_BASE);
+  });
+
+  it('does not let a stray pt-PT document reach another language either', async () => {
+    await seedLocale(BASE_LOCALE, { welcome: { heading: 'Escrito à mão' } });
+    await seedLocale('sv-SE', { welcome: { subject: 'Välkommen' } });
+
+    const copy = await getEmailCopy('sv-SE');
+    expect(copy.welcome.subject).toBe('Välkommen');
+    // Falls through to the bundle, not to whatever that document says.
+    expect(copy.welcome.heading).toBe(EMAIL_COPY_BASE.welcome.heading);
+  });
+
+  it('carries the push reminder copy, which is not email', async () => {
+    // It lives under `email.*` because that is where locale resolution already
+    // happens; a parallel mechanism would be a second thing to keep filled.
+    const copy = await getEmailCopy(BASE_LOCALE);
+    expect(copy.reminders.streak_rescue_subject).toBeTruthy();
+    expect(copy.reminders.weekly_review_body).toContain('{{days}}');
+  });
+
+  it('resolves reminder copy for a translated locale like any other section', async () => {
+    await seedLocale('sv-SE', { reminders: { practice_nudge_subject: 'Öva idag?' } });
+
+    const copy = await getEmailCopy('sv-SE');
+    expect(copy.reminders.practice_nudge_subject).toBe('Öva idag?');
+    expect(copy.reminders.practice_nudge_body).toBe(EMAIL_COPY_BASE.reminders.practice_nudge_body);
+  });
 });

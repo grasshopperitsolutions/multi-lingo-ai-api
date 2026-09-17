@@ -19,9 +19,12 @@ import { db } from './firebase-admin';
  *   and service messages of this kind are exempt from opt-out under both
  *   GDPR and CAN-SPAM. Never stored in notificationPrefs.
  * - `announcements` — admin broadcasts, product news. Opt-outable.
- * - `reminders`     — practice/streak nudges. Opt-outable. Nothing sends
- *   this category yet (scheduled sending is out of scope); the category
- *   exists so the preference UI and storage don't need reshaping later.
+ * - `reminders`     — practice/streak nudges. Opt-outable. Sent by the hourly
+ *   cron in api/email.ts, **push only**: the mail queue releases
+ *   DAILY_SEND_CAP a day and shares it with transactional mail, so a daily
+ *   reminder email would starve the outbox. The email channel stays in the
+ *   model, and defaults off, so nothing has to be reshaped if that cap ever
+ *   lifts.
  */
 export type NotificationCategory = 'transactional' | 'announcements' | 'reminders';
 
@@ -33,13 +36,19 @@ export const OPTIONAL_CATEGORIES = ['announcements', 'reminders'] as const;
 export type NotificationPrefs = Record<string, { email: boolean; push: boolean }>;
 
 /**
- * Email defaults to on (opt-out) for optional categories; push defaults to
- * off (opt-in) everywhere, because a browser notification is intrusive and
- * requires an explicit permission grant anyway.
+ * Announcements default to email-on (opt-out): they are occasional and an
+ * admin writing one expects it to reach people.
+ *
+ * Reminders default to **both off**. Email because nothing sends reminders by
+ * email and defaulting a channel to on that is never used is a promise the
+ * product does not keep. Push because a browser notification needs an explicit
+ * permission grant anyway — but note that the frontend's opt-in flow turns
+ * `reminders.push` on at the moment the user grants permission, so the
+ * off-by-default here is the state before that choice, not after it.
  */
 export const DEFAULT_PREFS: NotificationPrefs = {
   announcements: { email: true, push: false },
-  reminders: { email: true, push: false },
+  reminders: { email: false, push: false },
 };
 
 /** Merges a stored (possibly partial or malformed) prefs object over the defaults. */

@@ -22,9 +22,16 @@ import { logInfo, logWarn, startTimer } from '../lib/logger';
 import { reportError, reportMessage } from '../lib/sentry';
 import { sendEmailSafe, sendBatchSafe, type EmailMessage } from '../lib/email';
 import { sendPushToTokens, isPushSubscribed } from '../lib/push';
-import { getEmailCopy } from '../lib/email-copy';
+import { getEmailCopy, renderTemplate } from '../lib/email-copy';
 import { contactFormEmail, broadcastEmail, reportDigestEmail } from '../lib/email-templates';
 import { normalizePrefs } from '../lib/notification-prefs';
+import {
+  chooseReminder,
+  localParts,
+  needsLessonsRead,
+  normalizeReminderPrefs,
+  type ReminderTemplate,
+} from '../lib/reminders';
 import { enqueueEmails, drainQueue, pendingCount, DAILY_SEND_CAP } from '../lib/mail-queue';
 import type { VercelRequest, VercelResponse } from '../lib/types';
 
@@ -374,16 +381,189 @@ async function handleReportDigest(elapsed: () => number) {
   return { unreadCount, sent: !!result };
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// practice reminders (cron, hourly)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Users read per page while scanning. Small enough to stay well inside memory. */
+const REMINDER_PAGE_SIZE = 200;
+
 /**
- * The single scheduled entry point, invoked once a day by the cron in
- * vercel.json. Vercel sends CRON_SECRET as a Bearer token; there is no
- * Firebase session on a cron request, which is why this is checked before
- * anything else and why GET bypasses verifyAuth entirely.
+ * Stop scanning at this point and finish next hour. maxDuration is 120s; this
+ * leaves room to flush the sends already in flight and to log honestly that
+ * the scan did not complete, rather than being killed mid-write.
+ */
+const REMINDER_TIME_BUDGET_MS = 90_000;
+
+/** Push fan-out concurrency, same pool size the broadcast uses. */
+const REMINDER_CONCURRENCY = 5;
+
+/**
+ * Every user whose local reminder hour is now, pushed once.
  *
- * Two jobs run here rather than two crons because both are once-daily and
- * both are idempotent on their own date stamp. The queue drains first: it is
- * the one with a hard provider cap behind it, and it should not be skipped
- * because the digest happened to fail.
+ * Runs hourly because reminders are scheduled against the user's own clock:
+ * a single daily UTC run cannot say "practice tonight" to someone in Tokyo and
+ * someone in Lisbon at the same time. Each user matches in exactly one of the
+ * 24 runs, so the sends are spread out; the scan is the part that repeats.
+ *
+ * **Push only.** Email reminders are deliberately not sent even to users whose
+ * `reminders.email` is on: the outbox releases DAILY_SEND_CAP a day and is
+ * shared with transactional mail, so a daily reminder would starve it. The
+ * preference exists and is honoured by nothing — see notification-prefs.ts,
+ * where the default was flipped to off to match.
+ */
+async function handlePracticeReminders(elapsed: () => number) {
+  const startedAt = Date.now();
+  const now = new Date();
+
+  const stats = {
+    scanned: 0,
+    sent: 0,
+    byTemplate: {} as Record<string, number>,
+    skippedNoTimezone: 0,
+    incomplete: false,
+  };
+
+  let cursor: FirebaseFirestore.QueryDocumentSnapshot | null = null;
+
+  // Paged with a __name__ cursor rather than one big read: nothing else in
+  // this repo iterates the whole users collection, and the broadcast path
+  // refuses above 500 instead of paging. This is the loop that lets a
+  // reminder reach user 501.
+  for (;;) {
+    let query = db.collection('users').orderBy('__name__').limit(REMINDER_PAGE_SIZE);
+    if (cursor) query = query.startAfter(cursor);
+
+    const page = await query.get();
+    if (page.empty) break;
+
+    cursor = page.docs[page.docs.length - 1];
+    stats.scanned += page.size;
+
+    const due: {
+      uid: string;
+      data: FirebaseFirestore.DocumentData;
+      template: ReminderTemplate;
+      localDate: string;
+      lessonsRemaining?: number;
+    }[] = [];
+
+    for (const doc of page.docs) {
+      const data = doc.data();
+      const tokens = (data.fcmTokens ?? []) as string[];
+
+      // Cheapest checks first: no device, or opted out, and nothing else
+      // about this user needs computing.
+      if (tokens.length === 0) continue;
+      if (!isPushSubscribed(data, 'reminders')) continue;
+
+      const local = localParts(data.timezone, now);
+      if (!local) {
+        // No timezone, or one Intl rejects. Skipped rather than defaulted to
+        // UTC: a reminder at the wrong hour is worse than none.
+        stats.skippedNoTimezone++;
+        continue;
+      }
+
+      const prefs = normalizeReminderPrefs(data.reminderPrefs);
+      const sentAt = (data.reminderSentAt ?? {}) as Record<string, string>;
+
+      let lessonsRemaining: number | undefined;
+      if (needsLessonsRead(prefs, local, sentAt)) {
+        const settings = await db
+          .collection('users').doc(doc.id)
+          .collection('personalSettings').doc('main')
+          .get();
+        const value = settings.data()?.lessonsRemaining;
+        if (typeof value === 'number') lessonsRemaining = value;
+      }
+
+      const template = chooseReminder({
+        prefs,
+        local,
+        dayStreak: typeof data.dayStreak === 'number' ? data.dayStreak : 0,
+        lastStreakDate: typeof data.lastStreakDate === 'string' ? data.lastStreakDate : undefined,
+        sentAt,
+        lessonsRemaining,
+        now,
+      });
+
+      if (template) due.push({ uid: doc.id, data, template, localDate: local.date, lessonsRemaining });
+    }
+
+    await pooled(due, REMINDER_CONCURRENCY, async ({ uid, data, template, localDate, lessonsRemaining }) => {
+      const copy = await getEmailCopy(data.interfaceLang);
+      const strings = copy.reminders ?? {};
+
+      const vars = {
+        days: String(data.dayStreak ?? 0),
+        words: String(Array.isArray(data.seenConceptIds) ? data.seenConceptIds.length : 0),
+        n: String(lessonsRemaining ?? 0),
+      };
+
+      const title = renderTemplate(strings[`${template}_subject`] ?? '', vars);
+      const body = renderTemplate(strings[`${template}_body`] ?? '', vars);
+      if (!title) return;
+
+      const reached = await sendPushToTokens(
+        uid,
+        (data.fcmTokens ?? []) as string[],
+        { title, body, link: '/dashboard/personal' },
+        { template, category: 'reminders' },
+      );
+      if (reached === 0) return;
+
+      // Stamped with the user's LOCAL date, which is what chooseReminder
+      // compares against. A UTC stamp would let a second push through in the
+      // zones where the two dates disagree.
+      await db.collection('users').doc(uid).set(
+        { reminderSentAt: { [template]: localDate } },
+        { merge: true },
+      );
+
+      stats.sent++;
+      stats.byTemplate[template] = (stats.byTemplate[template] ?? 0) + 1;
+    });
+
+    if (page.size < REMINDER_PAGE_SIZE) break;
+
+    if (Date.now() - startedAt > REMINDER_TIME_BUDGET_MS) {
+      // Deliberately not checkpointed and resumed: the next run is an hour
+      // later, when a different set of users is due, so continuing this scan
+      // then would deliver at the wrong local hour. Logged loudly instead —
+      // if this ever fires, the scan needs sharding, not a cursor.
+      stats.incomplete = true;
+      logWarn('reminder_scan_incomplete', 'email', {
+        scanned: stats.scanned,
+        sent: stats.sent,
+        durationMs: elapsed(),
+      });
+      break;
+    }
+  }
+
+  logInfo('practice_reminders', 'email', { ...stats, durationMs: elapsed() });
+  return stats;
+}
+
+/**
+ * The single scheduled entry point, invoked by the crons in vercel.json.
+ * Vercel sends CRON_SECRET as a Bearer token; there is no Firebase session on
+ * a cron request, which is why this is checked before anything else and why
+ * GET bypasses verifyAuth entirely.
+ *
+ * Two cadences, one endpoint, dispatched on `?job=`:
+ *
+ *   (no job)   daily 06:00 UTC — drain the mail queue, then the report digest.
+ *              Both are once-daily and idempotent on their own date stamp.
+ *              The queue drains first: it is the one with a hard provider cap
+ *              behind it, and should not be skipped because the digest failed.
+ *   reminders  hourly — practice reminders, which are scheduled against each
+ *              user's own clock and so cannot share a single daily run.
+ *
+ * Kept as one endpoint rather than two because this repo treats a new endpoint
+ * as a last resort; the same reasoning already put three jobs in this file.
  */
 async function handleCron(req: VercelRequest, res: VercelResponse, elapsed: () => number) {
   const secret = process.env.CRON_SECRET;
@@ -392,6 +572,15 @@ async function handleCron(req: VercelRequest, res: VercelResponse, elapsed: () =
   if (!secret || authHeader !== `Bearer ${secret}`) {
     logWarn('cron_unauthorized', 'email', { statusCode: 401, durationMs: elapsed() });
     return errorResponse(res, 'Unauthorized', 401);
+  }
+
+  // Two cron entries hit this one endpoint. The hourly one names its job;
+  // the original daily one names nothing and runs what it always ran, so the
+  // queue drain and the digest keep their once-a-day cadence and their date
+  // stamps stay meaningful.
+  if (req.query.job === 'reminders') {
+    const reminders = await handlePracticeReminders(elapsed);
+    return successResponse(res, { reminders });
   }
 
   const queue = await drainQueue();
