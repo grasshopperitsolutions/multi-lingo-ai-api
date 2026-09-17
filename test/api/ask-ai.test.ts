@@ -181,3 +181,102 @@ describe('method handling', () => {
     expect(res.statusCode).toBe(405);
   });
 });
+
+describe('POST /api/ask-ai — images', () => {
+  /**
+   * A student photographs their own notebook and the model reads it. The
+   * picture is never stored anywhere: it rides in the request body, is passed
+   * to the provider, and goes out of scope with the response.
+   */
+  const pixel = 'iVBORw0KGgoAAAANSUhEUg';
+  const image = { data: pixel, mimeType: 'image/png' };
+
+  const post = (body: Record<string, unknown>) =>
+    createMockReqRes({ method: 'POST', headers: bearer(TOKEN_ALICE), body });
+
+  beforeEach(() => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+  });
+
+  it('passes images through to the gemini provider', async () => {
+    const { req, res } = post({
+      prompt: 'read this page',
+      images: [image],
+      providerParams: { provider: 'gemini' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    // Fourth argument, after prompt, params and messages.
+    expect((askGemini as any).mock.calls[0][3]).toEqual([image]);
+  });
+
+  it('refuses images on a provider that cannot see them', async () => {
+    // Dropping them silently would answer confidently about a picture the
+    // model never saw, which reads as a bad answer rather than an
+    // unsupported request.
+    const { req, res } = post({
+      prompt: 'read this page',
+      images: [image],
+      providerParams: { provider: 'openai' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(400);
+    expect(askOpenAI).not.toHaveBeenCalled();
+  });
+
+  it('rejects a data: prefix rather than passing it to the model', async () => {
+    // A `data:image/png;base64,...` string is the single most likely thing to
+    // arrive here, and Gemini needs the payload without it.
+    const { req, res } = post({
+      prompt: 'read this',
+      images: [{ data: `data:image/png;base64,${pixel}`, mimeType: 'image/png' }],
+      providerParams: { provider: 'gemini' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(400);
+    expect(askGemini).not.toHaveBeenCalled();
+  });
+
+  it('rejects an image type the model does not accept', async () => {
+    const { req, res } = post({
+      prompt: 'read this',
+      images: [{ data: pixel, mimeType: 'image/gif' }],
+      providerParams: { provider: 'gemini' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects an oversized image instead of letting the platform reject the body', async () => {
+    const { req, res } = post({
+      prompt: 'read this',
+      images: [{ data: 'A'.repeat(4_000_001), mimeType: 'image/jpeg' }],
+      providerParams: { provider: 'gemini' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(400);
+    expect(askGemini).not.toHaveBeenCalled();
+  });
+
+  it('rejects more images than the cap', async () => {
+    const { req, res } = post({
+      prompt: 'read these',
+      images: [image, image, image, image, image],
+      providerParams: { provider: 'gemini' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('leaves an ordinary text request untouched', async () => {
+    const { req, res } = post({ prompt: 'hi', providerParams: { provider: 'gemini' } });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect((askGemini as any).mock.calls[0][3]).toBeUndefined();
+  });
+});

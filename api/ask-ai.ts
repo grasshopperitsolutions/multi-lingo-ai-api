@@ -18,6 +18,23 @@ const MAX_MESSAGES = 50;
 const MAX_MESSAGE_LENGTH = 8000;
 
 /**
+ * Image limits, and why they are what they are.
+ *
+ * Vercel rejects a request body over ~4.5MB before this handler ever runs, so
+ * a cap below that is the difference between a clear error and a mystery. One
+ * image at a time is what the only caller sends (a photo of a notebook page),
+ * and the ceiling is per-image rather than total so the failure names the
+ * file that is too big.
+ *
+ * Base64 inflates by about a third, so 4MB of base64 is a ~3MB photo — far
+ * more than a downscaled page needs. The client is expected to resize before
+ * sending; this is the backstop, not the plan.
+ */
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BASE64_LENGTH = 4_000_000;
+const ALLOWED_IMAGE_MIME = ['image/jpeg', 'image/png', 'image/webp'];
+
+/**
  * When LIMITS_ENFORCED=false (opt out explicitly) → limits are paused; everyone is
  *   treated as Explorer for display purposes but no requests are ever blocked.
  *   Useful during testing/beta.
@@ -88,6 +105,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (body.prompt && body.prompt.length > MAX_PROMPT_LENGTH) {
     return errorResponse(res, `prompt exceeds the maximum length of ${MAX_PROMPT_LENGTH} characters`, 400);
   }
+  if (body.images) {
+    if (!Array.isArray(body.images) || body.images.length > MAX_IMAGES) {
+      return errorResponse(res, `images must be an array of at most ${MAX_IMAGES} entries`, 400);
+    }
+    // Only Gemini is wired for this. Silently dropping the images on another
+    // provider would return a confident answer about a picture it never saw,
+    // which reads as a bad model rather than an unsupported request.
+    if (body.images.length > 0 && body.providerParams.provider !== 'gemini') {
+      return errorResponse(res, 'images are only supported by the gemini provider', 400);
+    }
+    for (const image of body.images) {
+      if (typeof image?.data !== 'string' || image.data.length === 0) {
+        return errorResponse(res, 'each image needs a base64 `data` string', 400);
+      }
+      if (image.data.startsWith('data:')) {
+        return errorResponse(res, 'image `data` must be base64 only, without the data: prefix', 400);
+      }
+      if (image.data.length > MAX_IMAGE_BASE64_LENGTH) {
+        return errorResponse(res, 'an image exceeds the maximum size; resize it before sending', 400);
+      }
+      if (!ALLOWED_IMAGE_MIME.includes(image?.mimeType)) {
+        return errorResponse(res, `image mimeType must be one of ${ALLOWED_IMAGE_MIME.join(', ')}`, 400);
+      }
+    }
+  }
+
   if (body.messages) {
     if (body.messages.length > MAX_MESSAGES) {
       return errorResponse(res, `messages exceeds the maximum of ${MAX_MESSAGES} entries`, 400);
@@ -98,7 +141,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
   }
 
-  const { prompt, messages, providerParams } = body;
+  const { prompt, messages, images, providerParams } = body;
   const provider = providerParams.provider;
   const model = providerParams.model ?? 'default';
   const promptLength = prompt?.length ?? 0;
@@ -112,6 +155,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     tier,
     promptLength,
     messageCount,
+    imageCount: images?.length ?? 0,
   });
 
   try {
@@ -121,7 +165,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         result = await askPerplexity(prompt, providerParams, messages);
         break;
       case 'gemini':
-        result = await askGemini(prompt, providerParams, messages);
+        result = await askGemini(prompt, providerParams, messages, images);
         break;
       case 'openai':
       default:

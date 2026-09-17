@@ -1,5 +1,5 @@
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
-import type { GeminiParams, AskAIResponse, ChatMessage } from '../types';
+import type { GeminiParams, AskAIResponse, ChatMessage, InlineImage } from '../types';
 import { logInfo, logWarn } from '../logger';
 
 const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
@@ -40,10 +40,14 @@ const DEFAULT_TTS_VOICE = 'Sulafat';
  *
  * Default model: gemini-3.5-flash.
  */
+/** A single Gemini content part: text, or an inline image. */
+type GeminiPart = { text: string } | { inlineData: { mimeType: string; data: string } };
+
 export async function askGemini(
   prompt: string | undefined,
   params: GeminiParams,
-  messages?: ChatMessage[]
+  messages?: ChatMessage[],
+  images?: InlineImage[]
 ): Promise<AskAIResponse> {
   // Route to TTS branch if requested
   if (params.tts === true) {
@@ -64,7 +68,7 @@ export async function askGemini(
       : undefined);
 
   // Build contents array: multi-turn or single-turn
-  let contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>;
+  let contents: Array<{ role: 'user' | 'model'; parts: GeminiPart[] }>;
 
   if (conversationMessages.length > 0) {
     contents = conversationMessages.map((m) => ({
@@ -74,6 +78,21 @@ export async function askGemini(
     }));
   } else {
     contents = [{ role: 'user', parts: [{ text: prompt ?? '' }] }];
+  }
+
+  // Images ride on the **last user turn**, so they arrive with the
+  // instruction that refers to them rather than at the top of a conversation
+  // the model has already moved on from. The text part stays first: Gemini's
+  // own guidance is that a single image placed after its prompt is read more
+  // reliably than one placed before it.
+  if (images?.length) {
+    const lastUserTurn = [...contents].reverse().find((c) => c.role === 'user');
+    const target = lastUserTurn ?? contents[contents.length - 1];
+    if (target) {
+      for (const image of images) {
+        target.parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
+      }
+    }
   }
 
   // Determine if JSON mode should be enabled

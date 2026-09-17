@@ -131,3 +131,68 @@ describe('askGemini — error mapping', () => {
     await expect(askGemini('hi', { provider: 'gemini' })).rejects.toMatchObject({ status: 500 });
   });
 });
+
+describe('askGemini — images', () => {
+  const image = { data: 'BASE64PIXEL', mimeType: 'image/png' };
+
+  it('attaches an image to the prompt turn, after the text', async () => {
+    generateContentMock.mockResolvedValueOnce(textResponse('a page of Portuguese verbs'));
+
+    await askGemini('read this page', { provider: 'gemini' } as any, undefined, [image]);
+
+    const { contents } = generateContentMock.mock.calls[0][0];
+    expect(contents).toHaveLength(1);
+    // Text first: Gemini reads a single image placed after its instruction
+    // more reliably than one placed before it.
+    expect(contents[0].parts[0]).toEqual({ text: 'read this page' });
+    expect(contents[0].parts[1]).toEqual({ inlineData: image });
+  });
+
+  it('attaches to the last user turn of a conversation, not the first', async () => {
+    generateContentMock.mockResolvedValueOnce(textResponse('ok'));
+
+    await askGemini(
+      undefined,
+      { provider: 'gemini' } as any,
+      [
+        { role: 'user', content: 'here is my homework' },
+        { role: 'assistant', content: 'go ahead' },
+        { role: 'user', content: 'what did I get wrong?' },
+      ] as any,
+      [image]
+    );
+
+    const { contents } = generateContentMock.mock.calls[0][0];
+    // The picture belongs with the question that refers to it — dropped on
+    // the opening turn it arrives with an instruction the model has already
+    // answered and moved past.
+    expect(contents[0].parts).toEqual([{ text: 'here is my homework' }]);
+    expect(contents[2].parts).toEqual([
+      { text: 'what did I get wrong?' },
+      { inlineData: image },
+    ]);
+  });
+
+  it('sends several images in the order they were given', async () => {
+    generateContentMock.mockResolvedValueOnce(textResponse('two pages'));
+    const second = { data: 'SECOND', mimeType: 'image/jpeg' };
+
+    await askGemini('read both', { provider: 'gemini' } as any, undefined, [image, second]);
+
+    const { contents } = generateContentMock.mock.calls[0][0];
+    expect(contents[0].parts).toEqual([
+      { text: 'read both' },
+      { inlineData: image },
+      { inlineData: second },
+    ]);
+  });
+
+  it('changes nothing when no images are passed', async () => {
+    generateContentMock.mockResolvedValueOnce(textResponse('plain'));
+
+    await askGemini('just text', { provider: 'gemini' } as any);
+
+    const { contents } = generateContentMock.mock.calls[0][0];
+    expect(contents[0].parts).toEqual([{ text: 'just text' }]);
+  });
+});

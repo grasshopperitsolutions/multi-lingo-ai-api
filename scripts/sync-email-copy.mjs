@@ -48,11 +48,21 @@ async function readSource() {
  * The generated file's exact text.
  *
  * The frontend's checker rebuilds this string from its own copy of the bundle
- * and compares it to the committed file byte for byte, so the format is a
- * contract between the two repos, not a style choice. Keep it deterministic:
- * JSON.stringify over the source object preserves that file's key order, and
- * both repos read the same file.
+ * and compares it to the committed file, so the format is a contract between
+ * the two repos, not a style choice. Keep it deterministic: JSON.stringify
+ * over the source object preserves that file's key order, and both repos read
+ * the same file.
+ *
+ * **Line endings are not part of the contract**, and pretending otherwise
+ * broke this on Windows. git's `core.autocrlf` rewrites the committed file to
+ * CRLF on checkout while this always renders LF, so a byte comparison failed
+ * on every Windows working copy while passing in CI — and running the writer
+ * to "fix" it produced a file git normalised straight back. Both sides are
+ * compared with line endings normalised.
  */
+/** Line endings are not part of the format contract — see render(). */
+const sameContent = (a, b) => a.replace(/\r\n/g, '\n') === b.replace(/\r\n/g, '\n');
+
 export function render(email) {
   return `/**
  * GENERATED FILE — DO NOT EDIT.
@@ -91,13 +101,20 @@ if (!email || typeof email !== 'object') {
 /** Writes the generated file, or compares against it, and sets the exit code. */
 function writeOrReport(email, expected, where) {
   if (!isCheck) {
+    const current = existsSync(TARGET) ? readFileSync(TARGET, 'utf8') : '';
+    if (sameContent(current, expected)) {
+      // Rewriting a file whose content already matches would flip its line
+      // endings and leave the working tree dirty for no reason.
+      console.log(`[sync-email-copy] already in step with the ${where}; nothing written`);
+      return;
+    }
     writeFileSync(TARGET, expected, 'utf8');
     console.log(`[sync-email-copy] wrote lib/email-copy.base.ts from the ${where}`);
     return;
   }
 
   const actual = existsSync(TARGET) ? readFileSync(TARGET, 'utf8') : '';
-  if (actual === expected) {
+  if (sameContent(actual, expected)) {
     console.log(`[sync-email-copy] in sync with the ${where}`);
     return;
   }

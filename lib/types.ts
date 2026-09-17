@@ -137,11 +137,32 @@ export interface ChatMessage {
   content: string;
 }
 
+/**
+ * One image sent alongside a prompt, inline rather than by URL.
+ *
+ * Inline because the alternative is storing the file first, and the one
+ * caller — a student photographing their own notebook — has no use for the
+ * photo after it is read. Nothing is written anywhere; it exists for the
+ * length of the request.
+ */
+export interface InlineImage {
+  /** Base64 **without** a data: prefix. */
+  data: string;
+  mimeType: string;
+}
+
 export interface AskAIRequest {
   /** Single-turn convenience shorthand — wrapped as a user message. */
   prompt?: string;
   /** Full conversation history for multi-turn exchanges. */
   messages?: ChatMessage[];
+  /**
+   * Images for the model to look at, attached to the prompt. Gemini only —
+   * every other provider rejects the request rather than quietly answering
+   * from the text alone, which would look like a bad answer instead of an
+   * unsupported one.
+   */
+  images?: InlineImage[];
   providerParams: ProviderParams;
 }
 
