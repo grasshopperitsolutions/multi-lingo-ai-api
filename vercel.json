@@ -41,6 +41,10 @@
     {
       "path": "/api/email",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/email?job=reminders",
+      "schedule": "0 * * * *"
     }
   ]
 }

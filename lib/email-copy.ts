@@ -9,10 +9,18 @@
  * below is the Portuguese source, and every other language is read from
  * appConfig/config/locales/{locale}.
  *
- * EMAIL_COPY_BASE must stay in step with the `email` section of that
- * frontend file. It is duplicated here on purpose: the base locale is
- * deliberately never stored in Firestore (see getTranslations() in
- * translationService.js), so the backend has nowhere to read it from.
+ * EMAIL_COPY_BASE lives in email-copy.base.ts and is **generated**, never
+ * hand-edited: `npm run sync:email-copy` rewrites it from the frontend's
+ * pt-PT file, and CI fails when the two disagree. The two repos deploy
+ * separately and cannot import each other, so a copy has to exist here — but
+ * it is a derived artifact rather than a second source of truth, which is the
+ * only arrangement in which the two cannot silently drift.
+ *
+ * **There is deliberately no pt-PT document in Firestore.** One existed, as an
+ * abandoned partial seed that nothing read, and it was deleted rather than
+ * synchronised: a copy in a database is a copy no pull request can be gated
+ * on, and that is the one that drifts. Portuguese is served from this file and
+ * changed by deploying it.
  *
  * Resolution falls back in three steps — requested locale, then en-US, then
  * this bundled Portuguese — so an unfilled locale yields English rather than
@@ -24,6 +32,7 @@
  */
 
 import { db } from './firebase-admin';
+import { EMAIL_COPY_BASE as GENERATED_BASE } from './email-copy.base';
 import { logWarn } from './logger';
 
 /** Matches BASE_LOCALE in the frontend's src/i18n.js. */
@@ -49,54 +58,13 @@ export interface EmailCopy {
   [template: string]: Record<string, string>;
 }
 
-export const EMAIL_COPY_BASE: EmailCopy = {
-  common: {
-    app_name: 'Multi Lingo AI',
-    greeting: 'Olá {{name}},',
-    greeting_fallback: 'Olá,',
-    button_open: 'Abrir o Multi Lingo AI',
-    footer_tagline: 'Pratica línguas com IA.',
-    footer_prefs: 'Gerir as tuas preferências de notificação',
-    footer_transactional: 'Recebeste este email porque diz respeito à tua conta.',
-    footer_optional: 'Recebeste este email porque aceitaste receber novidades.',
-  },
-  welcome: {
-    subject: 'Bem-vindo ao Multi Lingo AI',
-    heading: 'A tua prática começa aqui',
-    body: 'A tua conta está pronta. Escolhe um dialeto, define os teus interesses e começa a praticar — o tradutor, os jogos de palavras e o treino para exames estão à tua espera.',
-    cta: 'Aceitar o desafio',
-  },
-  subscription_activated: {
-    subject: 'O teu plano {{tier}} está ativo',
-    heading: 'Estás no plano {{tier}}',
-    body: 'A tua subscrição está ativa e todas as funcionalidades {{tier}} estão desbloqueadas. Pratica à vontade.',
-    cta: 'Ir para o painel',
-  },
-  subscription_cancel_scheduled: {
-    subject: 'O teu plano termina a {{date}}',
-    heading: 'Cancelamento agendado',
-    body: 'O teu plano {{tier}} termina a {{date}}. Manténs acesso total até lá e podes voltar quando quiseres.',
-    cta: 'Gerir o plano',
-  },
-  subscription_ended: {
-    subject: 'O teu plano terminou',
-    heading: 'De volta ao plano gratuito',
-    body: 'A tua subscrição terminou e a tua conta está agora no plano gratuito Explorer. O teu histórico de prática está intacto — podes voltar ao plano completo quando quiseres.',
-    cta: 'Ver os planos',
-  },
-  payment_failed: {
-    subject: 'Não conseguimos processar o teu pagamento',
-    heading: 'Problema com o pagamento',
-    body: 'O último pagamento do teu plano não foi concluído. Atualizar o cartão mantém o teu acesso sem interrupções — voltamos a tentar automaticamente assim que estiver resolvido.',
-    cta: 'Atualizar o cartão',
-  },
-  account_deleted: {
-    subject: 'A tua conta foi eliminada',
-    heading: 'A tua conta foi eliminada',
-    body: 'A tua conta Multi Lingo AI e todos os dados associados foram eliminados permanentemente, e qualquer subscrição ativa foi cancelada. Nada disto é recuperável. Obrigado por teres praticado connosco.',
-    cta: '',
-  },
-};
+/**
+ * The Portuguese source strings, from the generated file. Typed here rather
+ * than there because the generated file is data — giving it an import of its
+ * own consumer's interface would make a regeneration able to break the build
+ * in a way that has nothing to do with the strings.
+ */
+export const EMAIL_COPY_BASE: EmailCopy = GENERATED_BASE;
 
 /** Substitutes {{var}} placeholders — same convention as the frontend's renderTemplate. */
 export function renderTemplate(str: string, vars: Record<string, string | number> = {}): string {
@@ -176,9 +144,9 @@ async function getFallbackCopy(): Promise<EmailCopy> {
  * The bundled Portuguese is the floor and should never actually surface
  * unless the en-US document is missing too.
  *
- * pt-PT short-circuits: it is the source, deliberately never in Firestore.
- * A locale that fails the shape check, or is absent, is treated as unset and
- * gets English.
+ * pt-PT short-circuits: it is the source, and there is deliberately no pt-PT
+ * document in Firestore to read (see the module comment). A locale that fails
+ * the shape check, or is absent, is treated as unset and gets English.
  */
 export async function getEmailCopy(locale?: string | null): Promise<EmailCopy> {
   const normalized = normalizeLocale(locale);
