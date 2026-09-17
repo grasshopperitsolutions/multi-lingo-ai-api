@@ -68,6 +68,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     ? (userData.subscriptionTier ?? 'explorer')
     : 'explorer';
 
+  /**
+   * What the user is actually subscribed to.
+   *
+   * `tier` above is a **quota** decision and is pinned to explorer whenever
+   * limits are paused, which is right for counting calls and wrong for
+   * anything else. Choosing the model from it would put every paying user on
+   * the Explorer model for the whole of a testing period — silently, and
+   * precisely when someone is judging output quality.
+   */
+  const storedTier: SubscriptionTier = userData.subscriptionTier ?? 'explorer';
+
   const today = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
 
   if (LIMITS_ENFORCED && (tier === 'explorer' || tier === 'voyager')) {
@@ -143,6 +154,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const { prompt, messages, images, providerParams } = body;
   const provider = providerParams.provider;
+
+  // ── The Explorer model swap ──────────────────────────────────────────────
+  //
+  // The request carries two candidates — `model` and `explorerModel` — both
+  // read off the admin-edited prompt document, and the server picks. Doing it
+  // here rather than in the client is not about trust (the model has always
+  // been whatever the client sent) but about plumbing: the tier is already
+  // resolved above for quota, and the alternative is threading it through a
+  // dozen services that have no other reason to know it.
+  //
+  // Absent or blank means "the same model as everyone else", which is the
+  // state of every prompt nobody has deliberately split.
+  if (storedTier === 'explorer' && providerParams.explorerModel) {
+    providerParams.model = providerParams.explorerModel;
+  }
+
   const model = providerParams.model ?? 'default';
   const promptLength = prompt?.length ?? 0;
   const messageCount = messages?.length ?? 0;
@@ -156,6 +183,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     promptLength,
     messageCount,
     imageCount: images?.length ?? 0,
+    explorerModel: storedTier === 'explorer' && !!providerParams.explorerModel,
   });
 
   try {

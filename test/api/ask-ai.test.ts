@@ -280,3 +280,76 @@ describe('POST /api/ask-ai — images', () => {
     expect((askGemini as any).mock.calls[0][3]).toBeUndefined();
   });
 });
+
+describe('POST /api/ask-ai — the Explorer model', () => {
+  /**
+   * The prompt document carries two models — `model` for everyone and
+   * `explorerModel` for the free tier — and the server picks between them.
+   * Blank or absent means "the same model as everyone else", which is the
+   * state of every prompt nobody has deliberately split.
+   */
+  const post = (body: Record<string, unknown>) =>
+    createMockReqRes({ method: 'POST', headers: bearer(TOKEN_ALICE), body });
+
+  const modelUsed = () => (askGemini as any).mock.calls[0][1].model;
+
+  it('swaps in the Explorer model for an Explorer', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    const { req, res } = post({
+      prompt: 'hi',
+      providerParams: { provider: 'gemini', model: 'big-model', explorerModel: 'small-model' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(modelUsed()).toBe('small-model');
+  });
+
+  it('leaves every other tier on the shared model', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    const { req, res } = post({
+      prompt: 'hi',
+      providerParams: { provider: 'gemini', model: 'big-model', explorerModel: 'small-model' },
+    });
+    await handler(req, res);
+
+    expect(modelUsed()).toBe('big-model');
+  });
+
+  it('leaves an Explorer on the shared model when no split is configured', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    const { req, res } = post({
+      prompt: 'hi',
+      providerParams: { provider: 'gemini', model: 'big-model' },
+    });
+    await handler(req, res);
+
+    expect(modelUsed()).toBe('big-model');
+  });
+
+  it('treats a blank explorerModel as no split, not as a model id', async () => {
+    // An admin clearing the field in the prompt editor leaves "" behind, and
+    // "" as a model id is a 400 from the provider rather than a fallback.
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    const { req, res } = post({
+      prompt: 'hi',
+      providerParams: { provider: 'gemini', model: 'big-model', explorerModel: '' },
+    });
+    await handler(req, res);
+
+    expect(modelUsed()).toBe('big-model');
+  });
+
+  it('applies to every provider, not just gemini', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    const { req, res } = post({
+      prompt: 'hi',
+      providerParams: { provider: 'openai', model: 'big-model', explorerModel: 'small-model' },
+    });
+    await handler(req, res);
+
+    // The split is a tier decision, not a Gemini one — tutor link validation
+    // runs on OpenAI and is exactly the kind of call worth making cheaper.
+    expect((askOpenAI as any).mock.calls[0][1].model).toBe('small-model');
+  });
+});

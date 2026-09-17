@@ -130,7 +130,24 @@ export interface GeminiParams {
   language?: string;
 }
 
-export type ProviderParams = OpenAIParams | PerplexityParams | GeminiParams;
+/**
+ * The model to use instead when the caller is on the Explorer tier.
+ *
+ * Deliberately not a field on any provider's own interface: it is not a
+ * parameter any provider understands, it is a second candidate the request
+ * carries so the server can choose between them. api/ask-ai.ts swaps it into
+ * `model` and nothing downstream ever sees it.
+ *
+ * It rides alongside `model` because that is where the model already lives —
+ * on the admin-edited prompt document, next to the template it belongs to.
+ * Blank or absent means "the same model as everyone else", which is the
+ * default for every prompt nobody has deliberately split.
+ */
+export interface TierModelOverride {
+  explorerModel?: string;
+}
+
+export type ProviderParams = (OpenAIParams | PerplexityParams | GeminiParams) & TierModelOverride;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
