@@ -158,6 +158,13 @@ export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
   grammarTips: { read: 'authenticated', write: 'authenticated' },
   grammarExercises: { read: 'authenticated', write: 'authenticated' },
   stories: { read: 'authenticated', write: 'authenticated' },
+
+  // Passages to read aloud for the pronunciation exercise. Same cache-first
+  // contract as the pools above — and worth being explicit that this holds the
+  // *text to read*, never a recording of anyone reading it. Audio is inline in
+  // the ask-ai request and is written nowhere, which is what §2.6 and §6 of the
+  // privacy policy promise.
+  pronunciationPassages: { read: 'authenticated', write: 'authenticated' },
   historyFacts: { read: 'authenticated', write: 'authenticated' },
 };
 

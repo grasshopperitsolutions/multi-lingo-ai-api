@@ -35,6 +35,36 @@ const MAX_IMAGE_BASE64_LENGTH = 4_000_000;
 const ALLOWED_IMAGE_MIME = ['image/jpeg', 'image/png', 'image/webp'];
 
 /**
+ * One recording per request, because the caller is a pronunciation exercise:
+ * a person reading one passage. Two clips would be two attempts, which is two
+ * requests.
+ *
+ * The size cap is generous on purpose and is not the real limit — Vercel
+ * rejects a body over ~4.5MB before this handler runs, and Opus at the bitrate
+ * a browser records at puts a minute of speech near 200KB before base64. A
+ * clip that reaches this cap is a bug in the client, not a long reading.
+ *
+ * The MIME list is what Gemini documents for audio input, intersected with
+ * what a browser's MediaRecorder actually produces: webm/opus on Chrome,
+ * ogg/opus on Firefox, mp4 on Safari. Anything else is rejected here rather
+ * than rejected less clearly by the model.
+ */
+const MAX_AUDIO_CLIPS = 1;
+const MAX_AUDIO_BASE64_LENGTH = 4_000_000;
+const ALLOWED_AUDIO_MIME = [
+  'audio/webm',
+  'audio/ogg',
+  'audio/mp4',
+  'audio/m4a',
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/wav',
+  'audio/aac',
+  'audio/flac',
+  'audio/opus',
+];
+
+/**
  * When LIMITS_ENFORCED=false (opt out explicitly) → limits are paused; everyone is
  *   treated as Explorer for display purposes but no requests are ever blocked.
  *   Useful during testing/beta.
@@ -142,6 +172,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
   }
 
+  if (body.audio) {
+    if (!Array.isArray(body.audio) || body.audio.length > MAX_AUDIO_CLIPS) {
+      return errorResponse(res, `audio must be an array of at most ${MAX_AUDIO_CLIPS} entry`, 400);
+    }
+    // Same reasoning as images: a provider that cannot hear would answer from
+    // the prompt alone and produce confident feedback about a recording it
+    // never received.
+    if (body.audio.length > 0 && body.providerParams.provider !== 'gemini') {
+      return errorResponse(res, 'audio is only supported by the gemini provider', 400);
+    }
+    for (const clip of body.audio) {
+      if (typeof clip?.data !== 'string' || clip.data.length === 0) {
+        return errorResponse(res, 'each audio clip needs a base64 `data` string', 400);
+      }
+      if (clip.data.startsWith('data:')) {
+        return errorResponse(res, 'audio `data` must be base64 only, without the data: prefix', 400);
+      }
+      if (clip.data.length > MAX_AUDIO_BASE64_LENGTH) {
+        return errorResponse(res, 'the audio clip exceeds the maximum size; record a shorter take', 400);
+      }
+      // The browser labels a recording `audio/webm;codecs=opus`; the codec
+      // parameter is the recorder's business, not ours.
+      const baseType = String(clip?.mimeType ?? '').split(';')[0].trim().toLowerCase();
+      if (!ALLOWED_AUDIO_MIME.includes(baseType)) {
+        return errorResponse(res, `audio mimeType must be one of ${ALLOWED_AUDIO_MIME.join(', ')}`, 400);
+      }
+    }
+  }
+
   if (body.messages) {
     if (body.messages.length > MAX_MESSAGES) {
       return errorResponse(res, `messages exceeds the maximum of ${MAX_MESSAGES} entries`, 400);
@@ -152,7 +211,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
   }
 
-  const { prompt, messages, images, providerParams } = body;
+  const { prompt, messages, images, audio, providerParams } = body;
   const provider = providerParams.provider;
 
   // ── The Explorer model swap ──────────────────────────────────────────────
@@ -183,6 +242,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     promptLength,
     messageCount,
     imageCount: images?.length ?? 0,
+    audioCount: audio?.length ?? 0,
     explorerModel: storedTier === 'explorer' && !!providerParams.explorerModel,
   });
 
@@ -193,7 +253,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         result = await askPerplexity(prompt, providerParams, messages);
         break;
       case 'gemini':
-        result = await askGemini(prompt, providerParams, messages, images);
+        result = await askGemini(prompt, providerParams, messages, images, audio);
         break;
       case 'openai':
       default:

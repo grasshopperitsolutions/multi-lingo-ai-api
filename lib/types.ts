@@ -168,6 +168,20 @@ export interface InlineImage {
   mimeType: string;
 }
 
+/**
+ * One recording the model listens to, inline in the request body.
+ *
+ * Inline for the same reason images are, and more strongly: the privacy policy
+ * (§2.6, §6) promises a recording is kept only as long as it takes to produce
+ * the feedback. Storing it first would make that promise harder to keep than
+ * simply never writing it anywhere.
+ */
+export interface InlineAudio {
+  /** Base64 **without** a data: prefix. */
+  data: string;
+  mimeType: string;
+}
+
 export interface AskAIRequest {
   /** Single-turn convenience shorthand — wrapped as a user message. */
   prompt?: string;
@@ -180,6 +194,12 @@ export interface AskAIRequest {
    * unsupported one.
    */
   images?: InlineImage[];
+  /**
+   * A recording for the model to listen to. Gemini only, same as images, and
+   * rejected rather than dropped elsewhere — answering from the text alone
+   * would look like bad feedback instead of an unsupported request.
+   */
+  audio?: InlineAudio[];
   providerParams: ProviderParams;
 }
 

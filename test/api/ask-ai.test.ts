@@ -353,3 +353,93 @@ describe('POST /api/ask-ai — the Explorer model', () => {
     expect((askOpenAI as any).mock.calls[0][1].model).toBe('small-model');
   });
 });
+
+describe('POST /api/ask-ai — audio', () => {
+  /**
+   * Somebody reads a passage aloud and the model listens. The recording rides
+   * in the request body and is written nowhere, which is what §2.6 and §6 of
+   * the privacy policy promise about pronunciation audio.
+   */
+  const clip = { data: 'T2dnUwACAAAAAAAAAAA', mimeType: 'audio/webm;codecs=opus' };
+
+  const post = (body: Record<string, unknown>) =>
+    createMockReqRes({ method: 'POST', headers: bearer(TOKEN_ALICE), body });
+
+  beforeEach(() => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+  });
+
+  it('passes the recording through to the gemini provider', async () => {
+    const { req, res } = post({
+      prompt: 'listen to this reading',
+      audio: [clip],
+      providerParams: { provider: 'gemini' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    // Fifth argument, after prompt, params, messages and images.
+    expect((askGemini as any).mock.calls[0][4]).toEqual([clip]);
+  });
+
+  it('accepts a mimeType carrying a codec parameter', async () => {
+    // What a browser actually labels a recording. Rejecting the codec suffix
+    // would reject every recording Chrome makes.
+    const { req, res } = post({
+      prompt: 'listen',
+      audio: [{ data: 'AAAA', mimeType: 'audio/ogg; codecs=opus' }],
+      providerParams: { provider: 'gemini' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('refuses audio on a provider that cannot hear it', async () => {
+    // Dropping it silently would return confident pronunciation feedback on a
+    // recording that never reached a model.
+    const { req, res } = post({
+      prompt: 'listen',
+      audio: [clip],
+      providerParams: { provider: 'openai' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects a data: prefix, a foreign format and an oversized clip', async () => {
+    for (const bad of [
+      { data: `data:audio/webm;base64,AAAA`, mimeType: 'audio/webm' },
+      { data: 'AAAA', mimeType: 'audio/amr' },
+      { data: 'A'.repeat(4_000_001), mimeType: 'audio/webm' },
+    ]) {
+      const { req, res } = post({
+        prompt: 'listen',
+        audio: [bad],
+        providerParams: { provider: 'gemini' },
+      });
+      await handler(req, res);
+      expect(res.statusCode).toBe(400);
+    }
+  });
+
+  it('allows only one clip — a second take is a second request', async () => {
+    const { req, res } = post({
+      prompt: 'listen',
+      audio: [clip, clip],
+      providerParams: { provider: 'gemini' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('leaves a request carrying no audio untouched', async () => {
+    const { req, res } = post({ prompt: 'hello', providerParams: { provider: 'gemini' } });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect((askGemini as any).mock.calls[0][4]).toBeUndefined();
+  });
+});

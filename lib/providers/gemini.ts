@@ -1,5 +1,5 @@
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
-import type { GeminiParams, AskAIResponse, ChatMessage, InlineImage } from '../types';
+import type { GeminiParams, AskAIResponse, ChatMessage, InlineImage, InlineAudio } from '../types';
 import { logInfo, logWarn } from '../logger';
 
 const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
@@ -47,7 +47,8 @@ export async function askGemini(
   prompt: string | undefined,
   params: GeminiParams,
   messages?: ChatMessage[],
-  images?: InlineImage[]
+  images?: InlineImage[],
+  audio?: InlineAudio[]
 ): Promise<AskAIResponse> {
   // Route to TTS branch if requested
   if (params.tts === true) {
@@ -85,12 +86,18 @@ export async function askGemini(
   // the model has already moved on from. The text part stays first: Gemini's
   // own guidance is that a single image placed after its prompt is read more
   // reliably than one placed before it.
-  if (images?.length) {
+  // Audio rides along the same way and for the same reason — the recording has
+  // to arrive with the instruction that says what to listen for. Appended
+  // after any images so a request carrying both keeps a stable part order.
+  const attachments: Array<InlineImage | InlineAudio> = [...(images ?? []), ...(audio ?? [])];
+  if (attachments.length) {
     const lastUserTurn = [...contents].reverse().find((c) => c.role === 'user');
     const target = lastUserTurn ?? contents[contents.length - 1];
     if (target) {
-      for (const image of images) {
-        target.parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
+      for (const attachment of attachments) {
+        target.parts.push({
+          inlineData: { mimeType: attachment.mimeType, data: attachment.data },
+        });
       }
     }
   }
