@@ -61,8 +61,23 @@ const ALLOWED_OPS = new Set([
 /** Default query limit when the caller does not specify one. */
 const DEFAULT_QUERY_LIMIT = 100;
 
-/** Hard cap on query limit regardless of what the caller requests. */
-const MAX_QUERY_LIMIT = 200;
+/**
+ * Hard cap on query limit regardless of what the caller requests.
+ *
+ * Raised from 200 because a shared *pool* is read whole, not paged: the word
+ * pool is fetched, filtered and sorted in code, and one large request is far
+ * cheaper than walking it 200 at a time. At 200 the frontend silently saw an
+ * arbitrary slice of anything larger — every user exhausted the same fixed
+ * window, the duplicate-avoidance list only named that window, and the word
+ * count derived from it plateaued.
+ *
+ * This was never an abuse control and cannot be one: `startAfter` already lets
+ * any caller page past it. It is a guard rail against an accidental unbounded
+ * response, and the real ceiling is the response body size — a few tens of
+ * thousands of small documents, well before this number. Per-collection caps
+ * are the tool if one collection ever needs its own.
+ */
+const MAX_QUERY_LIMIT = 100_000;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);

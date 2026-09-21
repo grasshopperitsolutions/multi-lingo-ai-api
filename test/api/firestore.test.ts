@@ -138,7 +138,7 @@ describe('GET /api/firestore — filtered query (findings 1.2, 1.3, 3.2)', () =>
     expect(res.body.data.documents.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('caps an oversized limit at the server-enforced maximum', async () => {
+  it('serves a whole pool rather than an arbitrary slice of it', async () => {
     for (let i = 0; i < 250; i++) {
       __testUtils.seedDoc('lessons', `l${i}`, { n: i });
     }
@@ -152,8 +152,13 @@ describe('GET /api/firestore — filtered query (findings 1.2, 1.3, 3.2)', () =>
       },
     });
     await handler(req, res);
+
+    // This used to clamp to 200, and the frontend had no idea: it read a fixed
+    // window of the word pool as though it were the whole thing, so every user
+    // exhausted the same 200 concepts and generated duplicates past them.
     expect(res.statusCode).toBe(200);
-    expect(res.body.data.documents.length).toBe(200);
+    expect(res.body.data.documents.length).toBe(250);
+    expect(res.body.data.hasMore).toBe(false);
   });
 });
 
