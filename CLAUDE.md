@@ -15,15 +15,24 @@ Avoid `coverage/`, `node_modules/`, generated output, and unrelated endpoints un
 
 A consolidated Vercel serverless API acting as a proxy in front of Firebase (Auth/Firestore/Storage), Stripe, and AI providers (OpenAI/Gemini/Perplexity) for the Multi-Lingo AI frontend. The frontend never talks to Firebase directly — `firestore.rules` denies all client reads/writes unconditionally, since every operation must go through this proxy using the Firebase Admin SDK (which bypasses those rules). This is the sole enforcement point for authorization.
 
-There are exactly 6 endpoints, each a separate Vercel serverless function (120s max duration, see `vercel.json`; the account is on Vercel Pro, so the ceiling is 800s if one ever needs it):
+There are exactly 7 endpoints, each a separate Vercel serverless function (120s max duration, see `vercel.json`; the account is on Vercel Pro, so the ceiling is 800s if one ever needs it):
 - `api/auth.ts` — sign-in (Google; Apple/Facebook/X recognized but return 501), logout, account deletion
 - `api/firestore.ts` — generic CRUD proxy over all Firestore collections
 - `api/storage.ts` — signed-URL upload/download and file metadata via Cloud Storage
 - `api/ask-ai.ts` — proxies chat/completion requests to OpenAI, Gemini, or Perplexity
 - `api/stripe.ts` — Checkout/Billing Portal sessions plus the Stripe webhook
 - `api/email.ts` — contact form and admin broadcast (POST), plus the nightly unread-report digest (GET, cron)
+- `api/live-token.ts` — mints an ephemeral Gemini token so the browser can open a Live API session directly
 
-Adding a seventh is a last resort — see the notification section below for why `api/email.ts` absorbed three unrelated jobs rather than becoming three routes.
+Adding an eighth is a last resort — see the notification section below for why `api/email.ts` absorbed three unrelated jobs rather than becoming three routes.
+
+**`api/live-token.ts` is the exception that proves that rule, and the reason is worth knowing before anyone tries to fold it back in.** Every other AI feature goes through `api/ask-ai.ts`; this one cannot. The Live API is a stateful **WebSocket**, and a Vercel function is an HTTP handler with a maximum duration — it can neither accept an inbound socket nor hold one open for the length of a lesson. So the session runs browser-to-Google and this endpoint does the only thing a server still can: decide whether it may start, and hand over a credential scoped tightly enough to be safe in a browser. Putting that inside `ask-ai` would have meant one POST that sometimes answers a prompt and sometimes issues credentials, with the validation, response shape and quota accounting all branching at the top.
+
+Three consequences of that split:
+
+- **The server cannot meter the conversation.** It never sees it, cannot count minutes and cannot end a session early. The only quantity it controls is *whether a session begins*, which is why the token is minted with `uses: 1` — one mint, one session. Live audio also costs far more per minute than any text call, so the daily `aiCallsToday` counter is the wrong instrument here and is deliberately not used.
+- **`liveConnectConstraints` is the safety, not the expiry.** Every token is locked to the live model and to `responseModalities: ['AUDIO']`, so a leaked one cannot be spent on a different model or a cheaper-to-abuse configuration. The short `expireTime`/`newSessionExpireTime` limit the blast radius; the constraint is what limits the blast.
+- **It is the first endpoint to read `appConfig/config/tiersConfig` and honour a feature grant server-side.** It deliberately does *not* hardcode a tier list the way `collection-policies` does with `writeTiers`: access to this is meant to be an Admin decision, and a second copy here would be a second place to change and forget. Granting `ai_tutor` to a tier in the Tiers screen is what opens the endpoint to it.
 
 ## Commands
 
@@ -126,4 +135,4 @@ Two noise filters exist on purpose: `api/ask-ai.ts` only reports 5xx (a 4xx is t
 
 ## Companion frontend repo
 
-The consumer of this API is `C:\Nuno\Projects\GrasshopperWebSite\projects\multi-lingo-ai`, a Vite+React app. This proxy's CORS allow-list (`lib/cors.ts`) is driven by `ALLOWED_ORIGINS`/`FRONTEND_URL`, which in practice is set to that frontend's origin — a mismatch there is the usual cause of blocked cross-origin requests during local dev. The frontend calls five of the six endpoints under `api/` (`/api/auth`, `/api/firestore`, `/api/storage`, `/api/ask-ai`, `/api/stripe`, `/api/email`; the digest path of `/api/email` is cron-only) with a Firebase ID token in `Authorization: Bearer <token>`, including anonymous/guest sessions for pre-login reads. When changing request/response shapes here, check that repo for matching client-side call sites.
+The consumer of this API is `C:\Nuno\Projects\GrasshopperWebSite\projects\multi-lingo-ai`, a Vite+React app. This proxy's CORS allow-list (`lib/cors.ts`) is driven by `ALLOWED_ORIGINS`/`FRONTEND_URL`, which in practice is set to that frontend's origin — a mismatch there is the usual cause of blocked cross-origin requests during local dev. The frontend calls six of the seven endpoints under `api/` (`/api/auth`, `/api/firestore`, `/api/storage`, `/api/ask-ai`, `/api/stripe`, `/api/email`, `/api/live-token`; the digest path of `/api/email` is cron-only) with a Firebase ID token in `Authorization: Bearer <token>`, including anonymous/guest sessions for pre-login reads. When changing request/response shapes here, check that repo for matching client-side call sites.
