@@ -5,6 +5,8 @@ import { askOpenAI } from '../lib/providers/openai';
 import { askPerplexity } from '../lib/providers/perplexity';
 import { askGemini } from '../lib/providers/gemini';
 import { db, FieldValue } from '../lib/firebase-admin';
+import { ttsCacheKey, readTtsClip, writeTtsClip } from '../lib/tts-cache';
+import { compressPcmToMp3 } from '../lib/mp3';
 import { log, logInfo, logError, startTimer } from '../lib/logger';
 import { reportError } from '../lib/sentry';
 import type { VercelRequest, VercelResponse, AskAIRequest, SubscriptionTier } from '../lib/types';
@@ -75,6 +77,37 @@ const ALLOWED_AUDIO_MIME = [
  */
 const LIMITS_ENFORCED = process.env.LIMITS_ENFORCED !== 'false';
 
+/**
+ * Decide whether this request may be served from, and written to, the shared
+ * speech cache — and under what key.
+ *
+ * Returns null for anything that is not a cacheable Gemini TTS request, which
+ * includes every ordinary text completion and the three surfaces that read
+ * back something the user typed (see TtsCacheHint in lib/types.ts).
+ *
+ * The length check mirrors the validation further down. That validation runs
+ * later, so without a check here a caller could hand us a megabyte to hash
+ * before anything had judged it — cheap, but there is no reason to do it.
+ */
+function ttsCacheRequestFor(body: AskAIRequest) {
+  const params: any = body?.providerParams;
+  if (params?.provider !== 'gemini' || params?.tts !== true || params?.cacheable !== true) return null;
+
+  const prompt = body?.prompt;
+  if (typeof prompt !== 'string' || prompt.length === 0 || prompt.length > MAX_PROMPT_LENGTH) return null;
+
+  const model: string = params.model ?? '';
+  const voice: string = params.voice ?? '';
+
+  return {
+    key: ttsCacheKey({ model, voice, prompt }),
+    model,
+    voice,
+    language: typeof params.language === 'string' ? params.language : undefined,
+    promptLength: prompt.length,
+  };
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
   if (handleCors(req, res)) return;
@@ -109,6 +142,60 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
    */
   const storedTier: SubscriptionTier = userData.subscriptionTier ?? 'explorer';
 
+  const body = req.body as AskAIRequest;
+
+  // ── The Explorer model swap ──────────────────────────────────────────────
+  //
+  // The request carries two candidates — `model` and `explorerModel` — both
+  // read off the admin-edited prompt document, and the server picks. Doing it
+  // here rather than in the client is not about trust (the model has always
+  // been whatever the client sent) but about plumbing: the tier is already
+  // resolved above for quota, and the alternative is threading it through a
+  // dozen services that have no other reason to know it.
+  //
+  // Absent or blank means "the same model as everyone else", which is the
+  // state of every prompt nobody has deliberately split.
+  //
+  // It happens *before* the cache lookup below because the model is part of
+  // the cache key: a tier reading a different model is listening to a
+  // different recording, and must not be served the other one's.
+  if (storedTier === 'explorer' && body?.providerParams?.explorerModel) {
+    body.providerParams.model = body.providerParams.explorerModel;
+  }
+
+  // ── Cached speech ────────────────────────────────────────────────────────
+  //
+  // Deliberately ahead of the quota gate. A clip that already exists costs no
+  // AI call, so charging one for it — or refusing it because the caller has
+  // spent their three for the day — would be charging for a lookup. An
+  // Explorer who has run out can still press play on everything they have
+  // already heard, which is the whole point of caching the audio at all.
+  const ttsRequest = ttsCacheRequestFor(body);
+  if (ttsRequest) {
+    const cached = await readTtsClip(ttsRequest.key);
+    if (cached) {
+      logInfo('tts_cache_hit', 'ask-ai', {
+        uid,
+        method: req.method,
+        tier,
+        model: ttsRequest.model || 'default',
+        voice: ttsRequest.voice,
+        language: ttsRequest.language ?? 'unknown',
+        bytes: cached.audioData.length,
+        statusCode: 200,
+        durationMs: elapsed(),
+      });
+
+      return successResponse(res, {
+        text: '',
+        provider: 'gemini',
+        model: ttsRequest.model || 'default',
+        audioData: cached.audioData,
+        mimeType: cached.mimeType,
+      });
+    }
+  }
+
   const today = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
 
   if (LIMITS_ENFORCED && (tier === 'explorer' || tier === 'voyager')) {
@@ -134,8 +221,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // maestro: no daily limit — falls through
   // LIMITS_ENFORCED=false: no limit, no counter write — falls through
   // ─────────────────────────────────────────────────────────────────────────
-
-  const body = req.body as AskAIRequest;
 
   if (!body?.providerParams?.provider) {
     return errorResponse(res, 'Missing required field: providerParams.provider', 400);
@@ -214,21 +299,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { prompt, messages, images, audio, providerParams } = body;
   const provider = providerParams.provider;
 
-  // ── The Explorer model swap ──────────────────────────────────────────────
-  //
-  // The request carries two candidates — `model` and `explorerModel` — both
-  // read off the admin-edited prompt document, and the server picks. Doing it
-  // here rather than in the client is not about trust (the model has always
-  // been whatever the client sent) but about plumbing: the tier is already
-  // resolved above for quota, and the alternative is threading it through a
-  // dozen services that have no other reason to know it.
-  //
-  // Absent or blank means "the same model as everyone else", which is the
-  // state of every prompt nobody has deliberately split.
-  if (storedTier === 'explorer' && providerParams.explorerModel) {
-    providerParams.model = providerParams.explorerModel;
-  }
-
   const model = providerParams.model ?? 'default';
   const promptLength = prompt?.length ?? 0;
   const messageCount = messages?.length ?? 0;
@@ -259,6 +329,38 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       default:
         result = await askOpenAI(prompt, providerParams, messages);
         break;
+    }
+
+    // ── Compress, then keep ──────────────────────────────────────────────
+    //
+    // Gemini hands back raw 24 kHz PCM: 48 KB per second, and 64 KB once
+    // base64'd for the response. Compressing it is what makes both halves of
+    // this work — a story paragraph goes from 1.3 MB, which is past
+    // Firestore's document ceiling, to about 160 KB, and the listener
+    // downloads eight times less either way. See lib/mp3.ts for why the
+    // bitrate looks generous.
+    //
+    // Everything is compressed, cacheable or not: the smaller response is
+    // worth having even for a clip nobody else will ever hear.
+    if (result.audioData) {
+      const compressed = compressPcmToMp3(result.audioData, result.mimeType);
+      result = { ...result, audioData: compressed.audioData, mimeType: compressed.mimeType };
+
+      // Awaited rather than fired and forgotten: Vercel can freeze the
+      // instance the moment the response is sent, and a write in flight dies
+      // with it — the same reason lib/sentry.ts flushes before responding.
+      // writeTtsClip never throws, so a cache failure cannot cost the caller
+      // the audio they just paid for.
+      if (ttsRequest) {
+        await writeTtsClip(ttsRequest.key, {
+          audioData: result.audioData!,
+          mimeType: result.mimeType!,
+          voice: ttsRequest.voice,
+          model: ttsRequest.model,
+          language: ttsRequest.language,
+          promptLength: ttsRequest.promptLength,
+        });
+      }
     }
 
     logInfo('ai_request_complete', 'ask-ai', {

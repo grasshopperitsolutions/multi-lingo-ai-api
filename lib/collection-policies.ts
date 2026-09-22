@@ -135,6 +135,15 @@ export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
   stripeEvents: { read: 'admin', write: 'admin' },
   cronRuns: { read: 'admin', write: 'admin' },
 
+  // Cached text-to-speech, written only by api/ask-ai.ts through the Admin
+  // SDK, which bypasses this file entirely. 'admin' here is about who may
+  // READ it back through the generic proxy, and the answer is nobody but an
+  // admin inspecting it: the frontend never reads this collection, it asks
+  // ask-ai for a clip and ask-ai decides whether one already exists. Left at
+  // the default, every document would count as unowned and therefore shared,
+  // handing any signed-in caller a way to page through base64 audio.
+  ttsClips: { read: 'admin', write: 'admin' },
+
   // Public tutor directory. Readable by anyone with a session, guests
   // included, because being findable is the whole point. Writes are locked to
   // the caller's own uid AND to the tiers allowed to be listed — see the

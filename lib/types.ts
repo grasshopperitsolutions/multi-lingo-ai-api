@@ -147,7 +147,32 @@ export interface TierModelOverride {
   explorerModel?: string;
 }
 
-export type ProviderParams = (OpenAIParams | PerplexityParams | GeminiParams) & TierModelOverride;
+/**
+ * Whether this request's result may be stored in the shared TTS cache.
+ *
+ * Like `explorerModel` above, this is not a parameter any provider
+ * understands — it is a decision the caller hands the server, and it rides
+ * here because `providerParams` is already the bag of per-request choices.
+ *
+ * It exists because the server cannot tell app content from a user's own
+ * words by looking at the text. `ttsClips` is shared by every user of the
+ * app, so the translator, the grammar text page and the dictionary's input
+ * box — the three surfaces that read back something a person typed — send
+ * this false and pay for synthesis every time. Everything else (stories,
+ * culture, exam listening, the challenge words) is generated content that
+ * everybody is entitled to hear.
+ *
+ * Absent means false. The default is "do not share" on purpose: a new call
+ * site that forgets the flag loses a cache hit, which is cheap, rather than
+ * putting a stranger's sentence in a pool everyone reads from.
+ */
+export interface TtsCacheHint {
+  cacheable?: boolean;
+}
+
+export type ProviderParams = (OpenAIParams | PerplexityParams | GeminiParams) &
+  TierModelOverride &
+  TtsCacheHint;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
