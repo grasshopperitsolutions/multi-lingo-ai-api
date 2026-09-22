@@ -199,3 +199,64 @@ describe('unauthenticated requests', () => {
     expect(res.statusCode).toBe(401);
   });
 });
+
+describe('POST /api/storage — fileName and contentType bounds', () => {
+  const upload = (body: Record<string, unknown>) =>
+    createMockReqRes({ method: 'POST', headers: bearer(TOKEN_ALICE), body });
+
+  it('accepts an ordinary name, accents included', async () => {
+    // pt-PT is the base locale here; rejecting accented names would be a bug,
+    // not a hardening.
+    const { req, res } = upload({ fileName: 'fachada-antiga.jpg', contentType: 'image/jpeg' });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('rejects a name carrying a path separator', async () => {
+    // It lands inside `${folder}/${uid}/${Date.now()}_${fileName}`. A write
+    // still cannot leave the caller's own prefix, but a name with a slash in
+    // it is one nobody can find or delete by hand afterwards.
+    const { req, res } = upload({ fileName: '../../escape.jpg', contentType: 'image/jpeg' });
+    await handler(req, res);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects a name carrying a control character', async () => {
+    const { req, res } = upload({ fileName: 'a\nb.jpg', contentType: 'image/jpeg' });
+    await handler(req, res);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects an unbounded name', async () => {
+    const { req, res } = upload({ fileName: `${'x'.repeat(5000)}.jpg`, contentType: 'image/jpeg' });
+    await handler(req, res);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects a contentType that is not a media type', async () => {
+    // Shape only, not an allowlist: `uploads` is general-purpose, unlike
+    // `avatars`, which keeps its own stricter list.
+    const { req, res } = upload({ fileName: 'x.pdf', contentType: 'not a mime type' });
+    await handler(req, res);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('applies the same rules to a PUT rename', async () => {
+    // The rename builds a new path from fileName exactly as the upload does,
+    // so the two must not drift apart.
+    __testUtils.seedDoc('files', 'f1', {
+      userId: 'alice',
+      fileName: 'ok.jpg',
+      filePath: 'uploads/alice/1_ok.jpg',
+      contentType: 'image/jpeg',
+    });
+
+    const { req, res } = createMockReqRes({
+      method: 'PUT',
+      headers: bearer(TOKEN_ALICE),
+      body: { fileId: 'f1', fileName: 'sub/dir.jpg' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(400);
+  });
+});

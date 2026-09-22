@@ -28,9 +28,11 @@ async function deleteSubCollections(docPath: string): Promise<void> {
  * Permanently deletes a user's entire account — Stripe subscription,
  * Firestore doc + sub-collections, owned `files` docs, the public tutor
  * profile and applications, Storage uploads, and finally the Firebase Auth
- * record. Shared by the self-service delete
- * (DELETE /api/auth) and the admin-driven delete (DELETE /api/admin-users)
- * so both stay in lockstep.
+ * record. Shared by the self-service delete and the admin-driven delete —
+ * both are `DELETE /api/auth`, which branches on whether a `uid` was supplied
+ * — so the two stay in lockstep. (There is no `/api/admin-users`; an earlier
+ * version of this comment named one, which is a confusing thing to find when
+ * the endpoint inventory is meant to be exactly seven.)
  */
 export async function deleteUserAccount(uid: string): Promise<void> {
   // 1. Cancel any active Stripe subscription (best-effort, non-fatal) —

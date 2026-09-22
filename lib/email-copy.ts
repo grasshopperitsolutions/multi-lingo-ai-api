@@ -51,7 +51,7 @@ export const FALLBACK_LOCALE = 'en-US';
  * so it can hold anything; this stops a junk value turning into a pointless
  * document read and a cache entry keyed on garbage.
  */
-const LOCALE_PATTERN = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+export const LOCALE_PATTERN = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
 
 export interface EmailCopy {
   common: Record<string, string>;

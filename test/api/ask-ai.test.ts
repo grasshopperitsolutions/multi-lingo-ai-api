@@ -443,3 +443,135 @@ describe('POST /api/ask-ai — audio', () => {
     expect((askGemini as any).mock.calls[0][4]).toBeUndefined();
   });
 });
+
+describe('when the datastore itself fails', () => {
+  it('answers with a 500 through errorResponse rather than throwing out', async () => {
+    // The quota read and write happen outside the provider try/catch. Before
+    // the top-level wrapper existed, a Firestore outage threw clean out of
+    // the handler: Vercel returned a platform 500, which carries none of the
+    // CORS headers this API sets, so the browser reported it as a CORS
+    // failure and the real cause never appeared. Same misdiagnosis CLAUDE.md
+    // documents for the firebase-admin v14 case.
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+
+    // Patched through the path the handler itself imports, so it is the same
+    // object identity the handler holds.
+    const { db } = await import('../../lib/firebase-admin');
+    const original = db.collection;
+    db.collection = () => {
+      throw new Error('Firestore unavailable');
+    };
+
+    try {
+      const { req, res } = createMockReqRes({
+        method: 'POST',
+        headers: bearer(TOKEN_ALICE),
+        body: { prompt: 'hi', providerParams: { provider: 'gemini' } },
+      });
+      await handler(req, res);
+
+      expect(res.statusCode).toBe(500);
+      // Through errorResponse, so the body is the API's own envelope.
+      expect(res.body?.success).toBe(false);
+    } finally {
+      db.collection = original;
+    }
+  });
+});
+
+describe('daily allowance comes from the Tiers screen', () => {
+  const seedTier = (id: string, data: Record<string, unknown>) =>
+    __testUtils.seedDoc('appConfig/config/tiersConfig', id, data);
+
+  const ask = () =>
+    createMockReqRes({
+      method: 'POST',
+      headers: bearer(TOKEN_ALICE),
+      body: { prompt: 'hi', providerParams: { provider: 'gemini' } },
+    });
+
+  it('enforces the number an admin configured, not the constant', async () => {
+    // The whole point: lowering a limit in Admin changes what the server
+    // allows, not just what the usage meter displays.
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    seedTier('explorer', { aiCallsPerDay: 1 });
+
+    const first = ask();
+    await handler(first.req, first.res);
+    expect(first.res.statusCode).toBe(200);
+
+    const second = ask();
+    await handler(second.req, second.res);
+    expect(second.res.statusCode).toBe(429);
+  });
+
+  it('treats a null allowance as unlimited', async () => {
+    // Admin writes Infinity for unlimited; JSON has no Infinity, so it lands
+    // as null. The frontend reads `?? Infinity` — this is the same rule.
+    __testUtils.seedDoc('users', 'alice', {
+      subscriptionTier: 'explorer',
+      aiCallsToday: 9999,
+      aiCallsDate: new Date().toISOString().slice(0, 10),
+    });
+    seedTier('explorer', { aiCallsPerDay: null });
+
+    const { req, res } = ask();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('honours a deliberate zero rather than reading it as absent', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    seedTier('explorer', { aiCallsPerDay: 0 });
+
+    const { req, res } = ask();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(429);
+  });
+
+  it('falls back to the old constant when config names no such tier', async () => {
+    // A config read that comes back empty must not hand out an unmetered
+    // paid key. Three is what explorer has always been.
+    __testUtils.seedDoc('users', 'alice', {
+      subscriptionTier: 'explorer',
+      aiCallsToday: 3,
+      aiCallsDate: new Date().toISOString().slice(0, 10),
+    });
+
+    const { req, res } = ask();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(429);
+  });
+
+  it('falls back when the configured value is not a number', async () => {
+    __testUtils.seedDoc('users', 'alice', {
+      subscriptionTier: 'explorer',
+      aiCallsToday: 3,
+      aiCallsDate: new Date().toISOString().slice(0, 10),
+    });
+    seedTier('explorer', { aiCallsPerDay: 'lots' });
+
+    const { req, res } = ask();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(429);
+  });
+
+  it('leaves a tier with no configured allowance unlimited', async () => {
+    // maestro has always fallen straight through, and still does.
+    __testUtils.seedDoc('users', 'alice', {
+      subscriptionTier: 'maestro',
+      aiCallsToday: 9999,
+      aiCallsDate: new Date().toISOString().slice(0, 10),
+    });
+    seedTier('maestro', { features: [] });
+
+    const { req, res } = ask();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+  });
+});

@@ -7,12 +7,61 @@ import { askGemini } from '../lib/providers/gemini';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { ttsCacheKey, readTtsClip, writeTtsClip } from '../lib/tts-cache';
 import { compressPcmToMp3 } from '../lib/mp3';
-import { log, logInfo, logError, startTimer } from '../lib/logger';
+import { logInfo, logError, startTimer } from '../lib/logger';
 import { reportError } from '../lib/sentry';
 import type { VercelRequest, VercelResponse, AskAIRequest, SubscriptionTier } from '../lib/types';
 
-const EXPLORER_DAILY_LIMIT = 3;
-const VOYAGER_DAILY_LIMIT = 20;
+/**
+ * The floor under the Tiers screen, not the source of truth.
+ *
+ * Daily allowances live on `appConfig/config/tiersConfig`, which is what the
+ * Tiers screen edits and what the whole frontend already reads — the pricing
+ * page, the usage meter and the confirm dialog all derive from it. These
+ * constants used to be the only enforcement, which meant an admin lowering a
+ * limit in Admin changed every number the user saw and none of what the
+ * server actually allowed.
+ *
+ * They remain for one case: config that cannot be read or does not name a
+ * tier. Falling back to "unlimited" there would hand out an unmetered paid
+ * key the moment a Firestore read hiccuped, so it falls back to the old
+ * numbers instead.
+ */
+const FALLBACK_DAILY_LIMITS: Partial<Record<SubscriptionTier, number>> = {
+  explorer: 3,
+  voyager: 20,
+};
+
+/**
+ * The caller's daily allowance, or null for unlimited.
+ *
+ * Null *is* the unlimited value rather than a missing one: the Tiers screen
+ * writes `Infinity` for unlimited, JSON has no Infinity, so it arrives as
+ * null and is stored that way. The frontend reads it back as
+ * `aiCallsPerDay ?? Infinity` (AppContext), and this is the same rule on the
+ * other side of the wire.
+ *
+ * A tier present in config wins outright, including a deliberate 0. Only a
+ * tier that is absent, or carries something that is not a finite number,
+ * falls back.
+ */
+function resolveDailyLimit(
+  tier: SubscriptionTier,
+  tiersSnapshot: { docs: Array<{ id: string; data: () => any }> }
+): number | null {
+  const tierDoc = tiersSnapshot.docs.find((doc) => doc.id === tier);
+
+  if (tierDoc) {
+    const configured = tierDoc.data()?.aiCallsPerDay;
+    if (configured === null || configured === undefined) return null;
+    if (typeof configured === 'number' && Number.isFinite(configured)) {
+      return Math.max(0, configured);
+    }
+    // Anything else is junk in the document; use the floor rather than
+    // reading it as permission.
+  }
+
+  return FALLBACK_DAILY_LIMITS[tier] ?? null;
+}
 
 /** Hard caps on request size, independent of any subscription tier. */
 const MAX_PROMPT_LENGTH = 8000;
@@ -108,12 +157,47 @@ function ttsCacheRequestFor(body: AskAIRequest) {
   };
 }
 
+/**
+ * The top-level catch, as a wrapper rather than a 290-line `try` around the
+ * body below.
+ *
+ * `firestore.ts` and `storage.ts` wrap their whole dispatch inline, and this
+ * is the same guarantee expressed differently: every path returns through
+ * `errorResponse`, so it carries CORS headers. That last part is the point.
+ * The quota read and write below talk to Firestore *outside* the provider
+ * try/catch further down, and an outage there used to throw clean out of the
+ * handler — a platform-level 500 with no CORS headers, which surfaces in the
+ * browser as "blocked by CORS policy" rather than as the 500 it is. That is
+ * the same misdiagnosis CLAUDE.md warns about for firebase-admin v14.
+ *
+ * The inner try/catch stays where it is: it maps *provider* failures, reading
+ * upstream status codes and choosing whether to wake anyone. A Firestore
+ * error reaching that catch would be reported as an upstream AI fault, which
+ * is worse than not catching it.
+ */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCorsHeaders(res);
   if (handleCors(req, res)) return;
 
   const elapsed = startTimer();
 
+  try {
+    return await _handleAskAI(req, res, elapsed);
+  } catch (error) {
+    await reportError('ai_request_unhandled_error', 'ask-ai', error, {
+      method: req.method,
+      statusCode: 500,
+      durationMs: elapsed(),
+    });
+    return errorResponse(res, 'AI request failed', 500);
+  }
+}
+
+async function _handleAskAI(
+  req: VercelRequest,
+  res: VercelResponse,
+  elapsed: () => number
+) {
   if (req.method !== 'POST') {
     return errorResponse(res, 'Method not allowed', 405);
   }
@@ -121,8 +205,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const uid = await verifyAuth(req, res);
   if (!uid) return;
 
+  // Anonymous sessions are allowed here, deliberately. They are not a guest
+  // tier — the platform requires a login — they are how API access works for
+  // tooling. Worth stating because the sibling live-token.ts refuses them,
+  // and the difference otherwise reads as an oversight: a fresh uid per
+  // anonymous session would reset `aiCallsToday`, which would matter if real
+  // visitors ever arrived that way. They do not.
+
   // ── Subscription quota check ──────────────────────────────────────────────
-  const userDoc = await db.collection('users').doc(uid).get();
+  const [userDoc, tiersSnapshot] = await Promise.all([
+    db.collection('users').doc(uid).get(),
+    db.collection('appConfig').doc('config').collection('tiersConfig').get(),
+  ]);
   const userData = userDoc.data() ?? {};
 
   // During testing (LIMITS_ENFORCED=false) everyone is treated as explorer;
@@ -198,11 +292,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const today = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
 
-  if (LIMITS_ENFORCED && (tier === 'explorer' || tier === 'voyager')) {
-    const dailyLimit = tier === 'explorer' ? EXPLORER_DAILY_LIMIT : VOYAGER_DAILY_LIMIT;
+  const dailyLimit = resolveDailyLimit(tier, tiersSnapshot);
+
+  // null is unlimited, which is how maestro has always passed through here.
+  if (LIMITS_ENFORCED && dailyLimit !== null) {
     const upgradeMessage = tier === 'explorer'
       ? 'Daily AI limit reached. Upgrade to Voyager for more.'
-      : 'Daily AI limit reached. Upgrade to Maestro for unlimited access.';
+      : tier === 'voyager'
+        ? 'Daily AI limit reached. Upgrade to Maestro for unlimited access.'
+        : 'Daily AI limit reached.';
 
     const callsDate: string = userData.aiCallsDate ?? '';
     const callsToday: number = callsDate === today ? (userData.aiCallsToday ?? 0) : 0;
@@ -218,7 +316,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       { merge: true }
     );
   }
-  // maestro: no daily limit — falls through
+  // A tier with no configured allowance — maestro, by default — falls through
   // LIMITS_ENFORCED=false: no limit, no counter write — falls through
   // ─────────────────────────────────────────────────────────────────────────
 

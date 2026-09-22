@@ -7,7 +7,7 @@ import { deleteUserAccount } from '../lib/delete-user-account';
 import { logInfo, logError, startTimer } from '../lib/logger';
 import { reportError } from '../lib/sentry';
 import { sendEmailSafe } from '../lib/email';
-import { getEmailCopy, FALLBACK_LOCALE } from '../lib/email-copy';
+import { getEmailCopy, FALLBACK_LOCALE, LOCALE_PATTERN } from '../lib/email-copy';
 import { welcomeEmail } from '../lib/email-templates';
 import type { VercelRequest, VercelResponse } from '../lib/types';
 
@@ -149,7 +149,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // to read it from yet. Validated because it is client-supplied and
         // ends up as a Firestore document id in the locale lookup.
         const detectedLang = typeof req.body.interfaceLang === 'string'
-          && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(req.body.interfaceLang)
+          && LOCALE_PATTERN.test(req.body.interfaceLang)
             ? req.body.interfaceLang
             : FALLBACK_LOCALE;
 

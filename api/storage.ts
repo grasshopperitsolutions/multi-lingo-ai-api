@@ -19,6 +19,58 @@ function sanitizeMetadata(raw: Record<string, unknown> = {}): Record<string, unk
 // rather than silently accepted as an arbitrary folder name.
 const ALLOWED_UPLOAD_FOLDERS = new Set(['uploads', 'avatars']);
 
+/**
+ * Caps on the two client strings that end up inside a stored object's path.
+ *
+ * `fileName` is interpolated into `${folder}/${uid}/${Date.now()}_${fileName}`
+ * and into the rename in PUT, and was previously checked only for being
+ * non-empty. A write still cannot escape the caller's own `{folder}/{uid}/`
+ * prefix — GCS object names are opaque strings, so `..` buys nothing — but an
+ * unbounded one is a stored name nobody can list, search or delete by hand,
+ * and this is the one endpoint that took client input of any length into
+ * something persistent. ask-ai caps every field it accepts; so does this now.
+ */
+const MAX_FILE_NAME_LENGTH = 200;
+const MAX_CONTENT_TYPE_LENGTH = 100;
+
+/** Path separators and control characters have no business in a stored name. */
+const UNSAFE_FILE_NAME = /[\x00-\x1f\x7f/\\]/;
+
+/** Deliberately shape-only: `uploads` is general-purpose, unlike `avatars`. */
+const CONTENT_TYPE_SHAPE = /^[\w.+-]+\/[\w.+-]+$/;
+
+/**
+ * Rejects a fileName/contentType pair, or returns null when both are fine.
+ * Shared by POST and PUT so the two cannot drift apart.
+ */
+function rejectBadFileFields(fileName: unknown, contentType: unknown): string | null {
+  if (fileName !== undefined) {
+    if (typeof fileName !== 'string' || fileName.length === 0) {
+      return 'fileName must be a non-empty string';
+    }
+    if (fileName.length > MAX_FILE_NAME_LENGTH) {
+      return `fileName must be ${MAX_FILE_NAME_LENGTH} characters or fewer`;
+    }
+    if (UNSAFE_FILE_NAME.test(fileName)) {
+      return 'fileName must not contain path separators or control characters';
+    }
+  }
+
+  if (contentType !== undefined) {
+    if (typeof contentType !== 'string' || contentType.length === 0) {
+      return 'contentType must be a non-empty string';
+    }
+    if (contentType.length > MAX_CONTENT_TYPE_LENGTH) {
+      return `contentType must be ${MAX_CONTENT_TYPE_LENGTH} characters or fewer`;
+    }
+    if (!CONTENT_TYPE_SHAPE.test(contentType)) {
+      return 'contentType must look like type/subtype';
+    }
+  }
+
+  return null;
+}
+
 // `avatars` uploads get a public-read ACL (see below), so unlike `uploads`
 // they're restricted to actual image types.
 const ALLOWED_AVATAR_CONTENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
@@ -41,6 +93,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (!fileName || !contentType) {
           return errorResponse(res, 'fileName and contentType are required', 400);
         }
+
+        const invalid = rejectBadFileFields(fileName, contentType);
+        if (invalid) return errorResponse(res, invalid, 400);
 
         if (!ALLOWED_UPLOAD_FOLDERS.has(folder)) {
           return errorResponse(
@@ -119,6 +174,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (!fileId) {
           return errorResponse(res, 'fileId is required', 400);
         }
+
+        // Both are optional on a rename, so only what was actually sent is
+        // checked — but a renamed object lands in a path the same way a new
+        // one does, so it gets the same guard.
+        const invalidUpdate = rejectBadFileFields(fileName, contentType);
+        if (invalidUpdate) return errorResponse(res, invalidUpdate, 400);
 
         const fileDoc = await db.collection('files').doc(fileId).get();
 
