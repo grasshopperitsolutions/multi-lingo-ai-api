@@ -145,20 +145,37 @@ describe('what the minted token is allowed to do', () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     // This is what makes handing a credential to a browser acceptable: a
     // leaked token cannot be spent on a different model or configuration.
-    expect(body.liveConnectConstraints.model).toContain('live');
-    expect(body.liveConnectConstraints.config.responseModalities).toEqual(['AUDIO']);
+    expect(body.bidiGenerateContentSetup.model).toContain('live');
+    expect(body.bidiGenerateContentSetup.generationConfig.responseModalities).toEqual(['AUDIO']);
   });
 
-  it('sends the model to Google fully qualified with models/', async () => {
-    // The actual production bug: every mint failed with a 400 because this
-    // was sent bare. Google's auth_tokens REST endpoint — unlike the
-    // @google/genai SDK used to open the session itself — takes no bare
-    // model names, only `models/{model}`.
+  it('names the setup field bidiGenerateContentSetup, not what the docs call it', async () => {
+    // The production bug, and the one most likely to be helpfully undone.
+    // Google's ephemeral-token documentation says `liveConnectConstraints`
+    // with the modalities under a nested `config`; the AuthToken message has
+    // no such field in any API version, and every mint failed with a 400
+    // naming it. It carries the Live API's own setup message instead, which
+    // keeps modalities under `generationConfig`. Checked against the live
+    // endpoint, not read off a page — the JSON validator runs before the API
+    // key is, so an invalid key is enough to ask it what it wants.
     const { req, res } = post();
     await handler(req, res);
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live-extended-thinking');
+    expect(body.bidiGenerateContentSetup).toBeDefined();
+    expect(body.liveConnectConstraints).toBeUndefined();
+    expect(body.bidiGenerateContentSetup.config).toBeUndefined();
+  });
+
+  it('sends the model to Google qualified with models/', async () => {
+    // Belt and braces rather than a requirement: bare and qualified both
+    // validate. This pins the form Google's own REST examples use, so the
+    // model is never the variable when something here has to be debugged.
+    const { req, res } = post();
+    await handler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.bidiGenerateContentSetup.model).toBe('models/gemini-3.8-live-extended-thinking');
   });
 
   it('does not double-qualify a GEMINI_LIVE_MODEL already set with the prefix', async () => {
@@ -172,7 +189,7 @@ describe('what the minted token is allowed to do', () => {
     await freshHandler(req, res);
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live');
+    expect(body.bidiGenerateContentSetup.model).toBe('models/gemini-3.8-live');
 
     delete process.env.GEMINI_LIVE_MODEL;
   });
@@ -244,7 +261,7 @@ describe('which model the caller asked for', () => {
     await handler(req, res);
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live');
+    expect(body.bidiGenerateContentSetup.model).toBe('models/gemini-3.8-live');
   });
 
   it('falls back when the caller names no model', async () => {
@@ -253,7 +270,7 @@ describe('which model the caller asked for', () => {
     await handler(req, res);
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live-extended-thinking');
+    expect(body.bidiGenerateContentSetup.model).toBe('models/gemini-3.8-live-extended-thinking');
   });
 
   it('falls back on a blank or non-string model', async () => {
@@ -263,7 +280,7 @@ describe('which model the caller asked for', () => {
       await handler(req, res);
 
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-      expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live-extended-thinking');
+      expect(body.bidiGenerateContentSetup.model).toBe('models/gemini-3.8-live-extended-thinking');
     }
   });
 
@@ -276,7 +293,7 @@ describe('which model the caller asked for', () => {
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(res.body.data.model).toBe('gemini-3.8-live');
-    expect(body.liveConnectConstraints.model).toBe(`models/${res.body.data.model}`);
+    expect(body.bidiGenerateContentSetup.model).toBe(`models/${res.body.data.model}`);
   });
 
   it('accepts a model already carrying the models/ prefix', async () => {
@@ -284,7 +301,7 @@ describe('which model the caller asked for', () => {
     await handler(req, res);
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live');
+    expect(body.bidiGenerateContentSetup.model).toBe('models/gemini-3.8-live');
   });
 
   it('truncates an absurdly long model rather than forwarding it', async () => {
@@ -292,7 +309,7 @@ describe('which model the caller asked for', () => {
     await handler(req, res);
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.liveConnectConstraints.model.length).toBeLessThanOrEqual('models/'.length + 200);
+    expect(body.bidiGenerateContentSetup.model.length).toBeLessThanOrEqual('models/'.length + 200);
   });
 });
 

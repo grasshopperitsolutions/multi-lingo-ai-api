@@ -74,11 +74,14 @@ const FALLBACK_LIVE_MODEL =
 const MAX_MODEL_LENGTH = 200;
 
 /**
- * `models/{model}`, the form Google's auth_tokens REST endpoint requires —
- * see the comment at its call site below for why. Strips an existing prefix
- * first so a `GEMINI_LIVE_MODEL` set to the fully-qualified form (someone
- * copying it straight out of Google's own docs, where every example is
- * qualified) does not double up into `models/models/...`.
+ * `models/{model}`, the form Google's REST examples use.
+ *
+ * **Not required** — the endpoint validates a bare name just as happily, as
+ * checked directly against it. Kept because matching the published examples
+ * costs nothing and removes a variable if this ever needs debugging again.
+ * Strips an existing prefix first so a `GEMINI_LIVE_MODEL` set to the
+ * qualified form (someone copying it out of those examples) does not double
+ * up into `models/models/...`.
  */
 function _qualifiedModel(model: string): string {
   return `models/${model.replace(/^models\//, '')}`;
@@ -188,18 +191,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // The lock that makes handing this to a browser acceptable: a token
         // minted for a tutoring session can only ever open a tutoring session.
         //
-        // `models/` prefixed here and nowhere else. Google's auth_tokens REST
-        // endpoint wants the fully-qualified `models/{model}` form (that is
-        // what its own request examples show) — this is a raw `fetch()`, not
-        // the SDK, so nothing normalises it on the way out. The response sent
-        // back to the browser below keeps the bare name: that value goes
-        // to `ai.live.connect({ model })` through the @google/genai SDK, which
-        // is what every SDK example uses unprefixed, and that call has never
-        // been reached in production — every mint has failed with a 400 from
-        // this endpoint first, on account of the missing prefix.
-        liveConnectConstraints: {
+        // **The field is `bidiGenerateContentSetup`, and it is not what the
+        // ephemeral-token docs call it.** They say `liveConnectConstraints`,
+        // with the modalities under a nested `config`. The AuthToken message
+        // has no such field, in v1beta or v1alpha — it carries the Live API's
+        // own setup message instead, so the modalities live under
+        // `generationConfig` where that message keeps them. Sending the
+        // documented name failed every mint with a 400 that named the field:
+        //
+        //   Unknown name "liveConnectConstraints" at 'auth_token':
+        //   Cannot find field.
+        //
+        // Established against the live endpoint rather than from the docs,
+        // which is worth doing again if this ever breaks: the JSON validator
+        // runs *before* the API key is checked, so an obviously invalid key
+        // is enough to ask the API what shape it wants, and "API key not
+        // valid" coming back means the payload parsed cleanly. `uses`,
+        // `expireTime`, `newSessionExpireTime`, `name` and
+        // `bidiGenerateContentSetup` are the whole message;
+        // `lockAdditionalFields` no longer exists either.
+        //
+        // `models/` on the model is *not* required — bare and prefixed both
+        // validate. It is kept because it is the form Google's own REST
+        // examples use. An earlier commit claimed the missing prefix was why
+        // minting failed; it was not, and nothing tested it because the real
+        // error body was being discarded at the time.
+        bidiGenerateContentSetup: {
           model: _qualifiedModel(liveModel),
-          config: { responseModalities: ['AUDIO'] },
+          generationConfig: { responseModalities: ['AUDIO'] },
         },
       }),
     });
