@@ -50,8 +50,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const post = () =>
-  createMockReqRes({ method: 'POST', headers: bearer(TOKEN_ALICE), body: {} });
+const post = (body: Record<string, unknown> = {}) =>
+  createMockReqRes({ method: 'POST', headers: bearer(TOKEN_ALICE), body });
 
 describe('who may start a session', () => {
   it('rejects an unauthenticated caller', async () => {
@@ -105,6 +105,19 @@ describe('who may start a session', () => {
     await handler(req, res);
 
     expect(res.statusCode).toBe(403);
+  });
+
+  it('refuses a caller with no user document at all', async () => {
+    // Deliberately not defaulted to explorer. getUserTier returns undefined
+    // for a missing document and this endpoint follows it, so an anomalous
+    // profile cannot inherit whatever the free tier happens to grant.
+    seedTiers({ explorer: ['ai_tutor'], maestro: ['ai_tutor'] });
+
+    const { req, res } = post();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('refuses a tier that does not exist in the config at all', async () => {
@@ -214,6 +227,72 @@ describe('what the minted token is allowed to do', () => {
     await handler(req, res);
 
     expect(JSON.stringify(res.body)).not.toContain('test-key');
+  });
+});
+
+describe('which model the caller asked for', () => {
+  beforeEach(() => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    seedTiers({ maestro: ['ai_tutor'] });
+  });
+
+  it('mints for the model the caller sent', async () => {
+    // Same contract as ask-ai's providerParams.model: the frontend reads it
+    // off the admin-edited prompt document and sends it. This endpoint does
+    // not read that document — the prompts collection has one reader.
+    const { req, res } = post({ model: 'gemini-3.8-live' });
+    await handler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live');
+  });
+
+  it('falls back when the caller names no model', async () => {
+    // A fresh install whose prompt document has no model field sends nothing.
+    const { req, res } = post();
+    await handler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live-extended-thinking');
+  });
+
+  it('falls back on a blank or non-string model', async () => {
+    for (const model of ['', '   ', 42, null]) {
+      vi.clearAllMocks();
+      const { req, res } = post({ model });
+      await handler(req, res);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live-extended-thinking');
+    }
+  });
+
+  it('echoes back the same model it locked the token to', async () => {
+    // The invariant the browser depends on: it opens the session with what
+    // came back, and a token only works with the model it was minted for. If
+    // these two drifted, every session would mint fine and fail to connect.
+    const { req, res } = post({ model: 'gemini-3.8-live' });
+    await handler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(res.body.data.model).toBe('gemini-3.8-live');
+    expect(body.liveConnectConstraints.model).toBe(`models/${res.body.data.model}`);
+  });
+
+  it('accepts a model already carrying the models/ prefix', async () => {
+    const { req, res } = post({ model: 'models/gemini-3.8-live' });
+    await handler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live');
+  });
+
+  it('truncates an absurdly long model rather than forwarding it', async () => {
+    const { req, res } = post({ model: 'x'.repeat(5000) });
+    await handler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.liveConnectConstraints.model.length).toBeLessThanOrEqual('models/'.length + 200);
   });
 });
 
