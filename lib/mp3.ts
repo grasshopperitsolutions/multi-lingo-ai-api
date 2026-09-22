@@ -31,8 +31,90 @@
  * do.
  */
 
-import lame from '@breezystack/lamejs';
 import { logWarn } from './logger';
+
+/**
+ * ## The encoder is loaded lazily, and that is not an optimisation
+ *
+ * `import lame from '@breezystack/lamejs'` at the top of this file took
+ * **`/api/ask-ai` down in production** — every AI feature in the app, for
+ * every user, from the moment the TTS cache deployed until it was found.
+ *
+ * The package declares `"type": "module"` and points its `require` condition
+ * at `dist/lamejs.iife.js`, a *browser* IIFE bundle. Vercel compiles these
+ * handlers to CommonJS, so the static import became a `require()` of a file
+ * Node considers ESM, and Node refuses:
+ *
+ *     ERR_REQUIRE_ESM: require() of ES Module .../lamejs.iife.js
+ *     from /var/task/lib/mp3.js not supported.
+ *
+ * Thrown while the *module* was loading, so the handler never ran at all —
+ * not even the CORS preflight, which is why the browser reported it as "no
+ * Access-Control-Allow-Origin" and it read as a CORS misconfiguration. Same
+ * misdiagnosis this repo already documents for firebase-admin v14: a
+ * platform-level 500 carries no CORS headers.
+ *
+ * It passed every local check. `node -e "require('@breezystack/lamejs')"`
+ * returns `{}` here rather than throwing, because newer Node can require ESM;
+ * Vercel's runtime cannot. **`npm test` and `npm run typecheck` cannot see
+ * this class of fault** — it is a resolution difference between two runtimes.
+ *
+ * Two things fix it, and both are needed:
+ *
+ * 1. **`import()` rather than `import`**, which resolves the package's
+ *    `import` condition (`dist/lamejs.js`, real ESM with real exports) and is
+ *    what Node's own error message recommends for loading ESM from CJS.
+ * 2. **Inside a function, behind a try/catch.** This is the load-bearing
+ *    half. Compression is a nicety — the audio plays perfectly uncompressed,
+ *    it merely will not fit a Firestore document — so a failure to load an
+ *    encoder must degrade to "not cached", never to a dead endpoint. Had the
+ *    load been here in the first place, the same packaging bug would have
+ *    cost a log line instead of an outage.
+ *
+ * Anything imported by a handler is in the blast radius of that handler. Keep
+ * optional dependencies out of module scope.
+ */
+type Mp3EncoderCtor = new (
+  channels: number,
+  sampleRate: number,
+  kbps: number,
+) => { encodeBuffer(left: Int16Array): Uint8Array; flush(): Uint8Array };
+
+/** `undefined` = not tried yet, `null` = tried and unavailable. */
+let encoderCtor: Mp3EncoderCtor | null | undefined;
+
+async function loadMp3Encoder(): Promise<Mp3EncoderCtor | null> {
+  if (encoderCtor !== undefined) return encoderCtor;
+
+  try {
+    const mod: any = await import('@breezystack/lamejs');
+    // The ESM build exports `Mp3Encoder` both named and on its default; which
+    // one arrives depends on how the bundler interops the two module systems,
+    // and neither is worth betting the endpoint on.
+    const candidate = mod?.Mp3Encoder ?? mod?.default?.Mp3Encoder;
+    encoderCtor = typeof candidate === 'function' ? candidate : null;
+
+    if (!encoderCtor) {
+      logWarn('tts_mp3_encoder_missing', 'ask-ai', {
+        reason: 'module loaded without an Mp3Encoder export',
+        keys: Object.keys(mod ?? {}).slice(0, 10).join(','),
+      });
+    }
+  } catch (err: any) {
+    // Cached as a permanent negative: a module that cannot resolve is a
+    // packaging fact, not a blip, and retrying means re-parsing 259 KB on
+    // every clip to fail the same way.
+    encoderCtor = null;
+    logWarn('tts_mp3_encoder_unavailable', 'ask-ai', {
+      errorMessage: err?.message ?? 'unknown',
+      errorCode: err?.code ?? 'unknown',
+    });
+  }
+
+  // `?? null` only to narrow the sentinel away: both branches above assign,
+  // so `undefined` cannot survive to here.
+  return encoderCtor ?? null;
+}
 
 /** See the header — this value is chosen to avoid resampling, not to hit a size. */
 const BITRATE_KBPS = 48;
@@ -66,13 +148,18 @@ function parseSampleRate(mimeType: string | undefined): number {
  * bytes in hand are perfectly playable as they are. The caller can tell the
  * two apart by the returned mimeType.
  */
-export function compressPcmToMp3(
+export async function compressPcmToMp3(
   audioBase64: string,
   mimeType: string | undefined
-): { audioData: string; mimeType: string; compressed: boolean } {
+): Promise<{ audioData: string; mimeType: string; compressed: boolean }> {
   const original = { audioData: audioBase64, mimeType: mimeType ?? 'audio/wav', compressed: false };
 
   if (!isRawPcm(mimeType)) return original;
+
+  // Asked for before any work is done, and the one call that can fail for a
+  // reason unrelated to this audio. See the note at the top of this file.
+  const Mp3Encoder = await loadMp3Encoder();
+  if (!Mp3Encoder) return original;
 
   try {
     const sampleRate = parseSampleRate(mimeType);
@@ -88,7 +175,7 @@ export function compressPcmToMp3(
       samples[i] = bytes.readInt16LE(i * 2);
     }
 
-    const encoder = new lame.Mp3Encoder(1, sampleRate, BITRATE_KBPS);
+    const encoder = new Mp3Encoder(1, sampleRate, BITRATE_KBPS);
     const chunks: Buffer[] = [];
 
     for (let offset = 0; offset < samples.length; offset += SAMPLES_PER_FRAME) {

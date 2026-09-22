@@ -441,7 +441,7 @@ async function _handleAskAI(
     // Everything is compressed, cacheable or not: the smaller response is
     // worth having even for a clip nobody else will ever hear.
     if (result.audioData) {
-      const compressed = compressPcmToMp3(result.audioData, result.mimeType);
+      const compressed = await compressPcmToMp3(result.audioData, result.mimeType);
       result = { ...result, audioData: compressed.audioData, mimeType: compressed.mimeType };
 
       // Awaited rather than fired and forgotten: Vercel can freeze the

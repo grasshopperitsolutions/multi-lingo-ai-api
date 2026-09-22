@@ -139,6 +139,51 @@ Two noise filters exist on purpose: `api/ask-ai.ts` only reports 5xx (a 4xx is t
 
 **firebase-admin is pinned to 13.x and must stay there.** v14 pulls `jwks-rsa@4` → `jose@6`, which is pure ESM with no CJS entry point, and Vercel's runtime cannot `require()` ESM even on Node 24 — so every function dies at module load with `ERR_REQUIRE_ESM`, before `setCorsHeaders` runs. A platform-level 500 carries no CORS headers, so the symptom in the browser is "blocked by CORS policy", not a 500. Nothing local catches this: the test suite mocks this module, so the real package's format is never exercised, and typecheck does not look at packaging. Moving to v14 requires making this API ESM (`"type": "module"` plus an ESM build), which is a project, not a dependency bump. Dependabot will keep proposing it.
 
+### ERR_REQUIRE_ESM has now cost two outages — keep optional deps out of module scope
+
+The firebase-admin note above is not a one-off. **`@breezystack/lamejs` took
+`/api/ask-ai` down for eighteen hours**, by the identical mechanism: the
+package is `"type": "module"` and points its `require` condition at
+`dist/lamejs.iife.js`, a *browser* IIFE. These handlers compile to CommonJS,
+so `import lame from '@breezystack/lamejs'` at the top of `lib/mp3.ts` became
+a `require()` of a file Node treats as ESM, and the module threw while
+loading — before `setCorsHeaders`, before the method check, before anything.
+Every AI feature in the app was dead, and the browser said "blocked by CORS
+policy".
+
+Three things to take from it, in order of how much they would have saved:
+
+- **Anything imported at module scope is in the blast radius of the handler
+  that imports it.** `lib/mp3.ts` compresses audio; the audio plays fine
+  uncompressed, and the only cost of not compressing is that the clip will not
+  fit a Firestore document. A dependency that optional must never be able to
+  stop a request being served. It is now loaded inside the function, behind a
+  try/catch, and a failure costs one `tts_mp3_encoder_unavailable` warning.
+- **`import()` rather than `import`** for anything ESM-only. It resolves the
+  package's `import` condition instead of its `require` one, and it is what
+  Node's own error message tells you to do.
+- **Neither `npm test` nor `npm run typecheck` can see this.** It is a
+  resolution difference between two runtimes: `require('@breezystack/lamejs')`
+  returns `{}` on a modern local Node rather than throwing, and typecheck
+  reads `type.d.ts`, which describes the source, not what ships. The check that
+  *does* catch it is hitting the deployed endpoint — `curl -X OPTIONS` is
+  enough, because the failure happens before any handler logic and so shows up
+  on a preflight.
+
+**So: after deploying anything that adds or changes a dependency, curl the
+affected endpoint.** A preflight against every route takes seconds and is the
+only local-to-you check that exercises real package resolution:
+
+```bash
+for ep in ask-ai firestore auth storage email live-token stripe; do
+  printf "%-12s " "$ep"
+  curl -s -o /dev/null -w "%{http_code}\n" -X OPTIONS \
+    "https://multi-lingo-ai-api.vercel.app/api/$ep" -H "Origin: $FRONTEND_URL"
+done
+```
+
+Anything other than 200 there is a function that is not loading at all.
+
 ## Companion frontend repo
 
 The consumer of this API is `C:\Nuno\Projects\GrasshopperWebSite\projects\multi-lingo-ai`, a Vite+React app. This proxy's CORS allow-list (`lib/cors.ts`) is driven by `ALLOWED_ORIGINS`/`FRONTEND_URL`, which in practice is set to that frontend's origin — a mismatch there is the usual cause of blocked cross-origin requests during local dev. The frontend calls six of the seven endpoints under `api/` (`/api/auth`, `/api/firestore`, `/api/storage`, `/api/ask-ai`, `/api/stripe`, `/api/email`, `/api/live-token`; the digest path of `/api/email` is cron-only) with a Firebase ID token in `Authorization: Bearer <token>`, including anonymous/guest sessions for pre-login reads. When changing request/response shapes here, check that repo for matching client-side call sites.
