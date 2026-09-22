@@ -52,6 +52,17 @@ const FEATURE_KEY = 'ai_tutor';
 const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL ?? 'gemini-3.8-live-extended-thinking';
 
 /**
+ * `models/{model}`, the form Google's auth_tokens REST endpoint requires —
+ * see the comment at its call site below for why. Strips an existing prefix
+ * first so a `GEMINI_LIVE_MODEL` set to the fully-qualified form (someone
+ * copying it straight out of Google's own docs, where every example is
+ * qualified) does not double up into `models/models/...`.
+ */
+function _qualifiedModel(model: string): string {
+  return `models/${model.replace(/^models\//, '')}`;
+}
+
+/**
  * Google's defaults are 30 minutes to send and 1 minute to open. Both are
  * shortened here: a token is handed out at the moment somebody presses start,
  * so a minute to connect is generous, and a lesson that has not begun within
@@ -117,8 +128,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         newSessionExpireTime: new Date(now + NEW_SESSION_WINDOW_MS).toISOString(),
         // The lock that makes handing this to a browser acceptable: a token
         // minted for a tutoring session can only ever open a tutoring session.
+        //
+        // `models/` prefixed here and nowhere else. Google's auth_tokens REST
+        // endpoint wants the fully-qualified `models/{model}` form (that is
+        // what its own request examples show) — this is a raw `fetch()`, not
+        // the SDK, so nothing normalises it on the way out. The response sent
+        // back to the browser below keeps the bare LIVE_MODEL: that value goes
+        // to `ai.live.connect({ model })` through the @google/genai SDK, which
+        // is what every SDK example uses unprefixed, and that call has never
+        // been reached in production — every mint has failed with a 400 from
+        // this endpoint first, on account of the missing prefix.
         liveConnectConstraints: {
-          model: LIVE_MODEL,
+          model: _qualifiedModel(LIVE_MODEL),
           config: { responseModalities: ['AUDIO'] },
         },
       }),
@@ -127,9 +148,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const payload = await response.json().catch(() => null);
 
     if (!response.ok || !payload?.name) {
+      // Google's own error body names what was wrong — an invalid model
+      // string, a malformed field, a quota rejection — and until now that
+      // detail was thrown away. A "mint failed, status 400" log with nothing
+      // else is a mystery, not a diagnosis; this repo's own history is why
+      // that matters, since more than one Gemini model constant has drifted
+      // wrong silently. Truncated because the body is untrusted upstream
+      // content, not because it is expected to be long.
+      const errorDetail = JSON.stringify(payload?.error ?? payload).slice(0, 500);
       logError('live_token_mint_failed', 'live-token', {
         uid,
         status: response.status,
+        errorDetail,
         ms: elapsed(),
       });
       return errorResponse(res, 'Could not start a conversation right now', 502);

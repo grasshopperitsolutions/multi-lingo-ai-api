@@ -136,6 +136,45 @@ describe('what the minted token is allowed to do', () => {
     expect(body.liveConnectConstraints.config.responseModalities).toEqual(['AUDIO']);
   });
 
+  it('sends the model to Google fully qualified with models/', async () => {
+    // The actual production bug: every mint failed with a 400 because this
+    // was sent bare. Google's auth_tokens REST endpoint — unlike the
+    // @google/genai SDK used to open the session itself — takes no bare
+    // model names, only `models/{model}`.
+    const { req, res } = post();
+    await handler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live-extended-thinking');
+  });
+
+  it('does not double-qualify a GEMINI_LIVE_MODEL already set with the prefix', async () => {
+    // A plausible mistake: setting the env var to exactly what Google's own
+    // docs show, which are themselves qualified.
+    process.env.GEMINI_LIVE_MODEL = 'models/gemini-3.8-live';
+    vi.resetModules();
+    const { default: freshHandler } = await import('../../api/live-token');
+
+    const { req, res } = post();
+    await freshHandler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.liveConnectConstraints.model).toBe('models/gemini-3.8-live');
+
+    delete process.env.GEMINI_LIVE_MODEL;
+  });
+
+  it('returns the bare model name to the browser, not the qualified one', async () => {
+    // The response feeds ai.live.connect({ model }) through the SDK, which is
+    // documented and used unprefixed everywhere — the qualified form is only
+    // ever for the raw REST call above, never for what the browser gets back.
+    const { req, res } = post();
+    await handler(req, res);
+
+    expect(res.body.data.model).toBe('gemini-3.8-live-extended-thinking');
+    expect(res.body.data.model).not.toMatch(/^models\//);
+  });
+
   it('mints it for exactly one session', async () => {
     const { req, res } = post();
     await handler(req, res);
