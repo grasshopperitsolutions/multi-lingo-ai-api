@@ -167,6 +167,36 @@ describe('what the minted token is allowed to do', () => {
     expect(body.bidiGenerateContentSetup.config).toBeUndefined();
   });
 
+  it('locks exactly the fields it sets, and leaves the rest to the browser', async () => {
+    // With no mask, the token's setup replaced the browser's wholesale: the
+    // tutor's system instruction was silently dropped (told to say only
+    // "abacaxi", it chatted like a generic assistant) and a thinking level sent
+    // by the browser never arrived, so the extended-thinking model closed every
+    // socket with 1007. The mask is what makes the browser's setup count.
+    const { req, res } = post();
+    await handler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.fieldMask).toBe('model,generationConfig.responseModalities');
+  });
+
+  it('derives the mask from the setup, so nothing it sets is left open', async () => {
+    // A field added to the token later must be locked by default. If the two
+    // were written out separately they would drift, and the drift would fail
+    // open: a setting the server meant to fix becomes the token-holder's.
+    const { req, res } = post();
+    await handler(req, res);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const setup = body.bidiGenerateContentSetup;
+    const expected = Object.entries(setup).flatMap(([key, value]) =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.keys(value).map((inner) => `${key}.${inner}`)
+        : [key],
+    );
+    expect(body.fieldMask.split(',')).toEqual(expected);
+  });
+
   it('sends the model to Google qualified with models/', async () => {
     // Belt and braces rather than a requirement: bare and qualified both
     // validate. This pins the form Google's own REST examples use, so the

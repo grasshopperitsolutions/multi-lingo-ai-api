@@ -88,6 +88,38 @@ function _qualifiedModel(model: string): string {
 }
 
 /**
+ * The `fieldMask` for a token: every path the setup sets, and nothing else.
+ *
+ * **Without a mask the token's setup replaces the browser's entirely**, and
+ * that is not a theory. With no mask, a session minted here dropped every
+ * field the browser sent: the system instruction was ignored outright (told to
+ * answer only "abacaxi", the model chatted back as a generic assistant) and a
+ * `thinkingLevel` sent by the browser never arrived — so
+ * `gemini-3.8-live-extended-thinking`, which requires one, closed every socket
+ * with 1007 "Thinking level must be specified for this model." The SDK's own
+ * comment calls the no-mask case "lock all fields".
+ *
+ * A mask listing exactly what the server set is what the SDK sends for
+ * `lockAdditionalFields: []` — "lock only the fields in the constraints". The
+ * model and the modality stay locked, which is the security this endpoint
+ * exists for; the tutor's instructions, transcription and thinking level are
+ * the browser's, as they are for every other prompt in this app.
+ *
+ * Derived rather than written out, so a field added to the setup later is
+ * locked by default instead of silently left open to whoever holds the token.
+ * Two levels deep, as the SDK does it; arrays are values, not paths.
+ */
+function _lockedPaths(setup: Record<string, unknown>): string {
+  return Object.entries(setup)
+    .flatMap(([key, value]) =>
+      value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? Object.keys(value).map((inner) => `${key}.${inner}`)
+        : [key],
+    )
+    .join(',');
+}
+
+/**
  * Google's defaults are 30 minutes to send and 1 minute to open. Both are
  * shortened here: a token is handed out at the moment somebody presses start,
  * so a minute to connect is generous, and a lesson that has not begun within
@@ -179,6 +211,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       logWarn('live_token_model_suspect', 'live-token', { uid, model: liveModel });
     }
 
+    // Built first so the mask below can be derived from it — see _lockedPaths.
+    const setup = {
+      model: _qualifiedModel(liveModel),
+      generationConfig: { responseModalities: ['AUDIO'] },
+    };
+
     const now = Date.now();
     const response = await fetch(`${AUTH_TOKENS_URL}?key=${process.env.GEMINI_API_KEY}`, {
       method: 'POST',
@@ -207,19 +245,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // runs *before* the API key is checked, so an obviously invalid key
         // is enough to ask the API what shape it wants, and "API key not
         // valid" coming back means the payload parsed cleanly. `uses`,
-        // `expireTime`, `newSessionExpireTime`, `name` and
-        // `bidiGenerateContentSetup` are the whole message;
-        // `lockAdditionalFields` no longer exists either.
+        // `expireTime`, `newSessionExpireTime`, `name`,
+        // `bidiGenerateContentSetup` and `fieldMask` are the whole message.
+        // The docs' names are the SDK's, not the wire's: its authTokens.create
+        // translates `liveConnectConstraints` into `bidiGenerateContentSetup`
+        // and `lockAdditionalFields` into `fieldMask`, which is why both
+        // documented names come back "Unknown name" from a raw request.
         //
         // `models/` on the model is *not* required — bare and prefixed both
         // validate. It is kept because it is the form Google's own REST
         // examples use. An earlier commit claimed the missing prefix was why
         // minting failed; it was not, and nothing tested it because the real
         // error body was being discarded at the time.
-        bidiGenerateContentSetup: {
-          model: _qualifiedModel(liveModel),
-          generationConfig: { responseModalities: ['AUDIO'] },
-        },
+        bidiGenerateContentSetup: setup,
+        // Lock what the server set and nothing more; see _lockedPaths for the
+        // session this was missing from. A comma-separated string on the wire —
+        // the array form is rejected with "Unknown name".
+        fieldMask: _lockedPaths(setup),
       }),
     });
 
