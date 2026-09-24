@@ -171,14 +171,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           });
         }
 
+        // What the sign-in provider says. It seeds the profile and nothing
+        // more: after the first sign-in the name and picture are the user's,
+        // edited in Settings, and the provider's are only a fallback.
+        const accountName = userRecord.displayName || decodedToken.name || '';
+        const accountPhoto = userRecord.photoURL || decodedToken.picture || null;
+
         const userDocRef = db.collection('users').doc(userRecord.uid);
         const userDocSnap = await userDocRef.get();
+        const profile = userDocSnap.exists ? userDocSnap.data() ?? {} : {};
 
         if (!userDocSnap.exists) {
           await userDocRef.set({
             email: userRecord.email,
-            displayName: userRecord.displayName || decodedToken.name || '',
-            photoURL: userRecord.photoURL || decodedToken.picture || null,
+            displayName: accountName,
+            photoURL: accountPhoto,
             emailVerified: userRecord.emailVerified,
             provider: action,
             interfaceLang: detectedLang,
@@ -198,15 +205,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               welcomeEmail(
                 await getEmailCopy(detectedLang),
                 userRecord.email,
-                userRecord.displayName || decodedToken.name
+                accountName || undefined
               ),
               { template: 'welcome', uid: userRecord.uid, category: 'transactional' }
             );
           }
         } else {
+          // A returning user. This used to write the provider's name and
+          // picture over the profile on every sign-in, so a name or photo
+          // changed in Settings lasted exactly until the next login. The
+          // provider's values now only fill a field the profile is missing —
+          // a profile that lost them gets them back, and one the user edited
+          // is left alone.
+          const backfill: Record<string, unknown> = {};
+          if (!profile.displayName && accountName) backfill.displayName = accountName;
+          if (!profile.photoURL && accountPhoto) backfill.photoURL = accountPhoto;
+
           await userDocRef.update({
-            displayName: userRecord.displayName || decodedToken.name || '',
-            photoURL: userRecord.photoURL || decodedToken.picture || null,
+            ...backfill,
             emailVerified: userRecord.emailVerified,
             updatedAt: FieldValue.serverTimestamp(),
           });
@@ -226,8 +242,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return successResponse(res, {
           uid: userRecord.uid,
           email: userRecord.email,
-          displayName: userRecord.displayName || decodedToken.name || '',
-          photoURL: userRecord.photoURL || decodedToken.picture || null,
+          // The profile's, the same precedence the app loads with.
+          displayName: profile.displayName || accountName,
+          photoURL: profile.photoURL || accountPhoto,
           customToken
         });
       }

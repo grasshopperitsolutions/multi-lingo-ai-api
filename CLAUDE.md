@@ -191,6 +191,12 @@ done
 
 Anything other than 200 there is a function that is not loading at all.
 
+### Sign-in seeds the profile's name and picture; it never overwrites them
+
+`POST /api/auth` copies the provider's `displayName` and `photoURL` into `users/{uid}` on the **first** sign-in. After that they belong to the user, who changes them in Settings. On a later sign-in the provider's values only fill a field the profile is **missing** (empty or absent), so a profile that lost its name or picture gets it back and an edited one is left alone.
+
+It used to write both over the profile on every sign-in. A name or photo changed in Settings then lasted only until the next login. `test/api/auth.test.ts` covers both cases. The frontend reads the fields in the same order (profile first, provider second), and the response's `displayName`/`photoURL` follow it too.
+
 ## Companion frontend repo
 
 The consumer of this API is `C:\Nuno\Projects\GrasshopperWebSite\projects\multi-lingo-ai`, a Vite+React app. This proxy's CORS allow-list (`lib/cors.ts`) is driven by `ALLOWED_ORIGINS`/`FRONTEND_URL`, which in practice is set to that frontend's origin — a mismatch there is the usual cause of blocked cross-origin requests during local dev. The frontend calls six of the seven endpoints under `api/` (`/api/auth`, `/api/firestore`, `/api/storage`, `/api/ask-ai`, `/api/stripe`, `/api/email`, `/api/live-token`; the digest path of `/api/email` is cron-only) with a Firebase ID token in `Authorization: Bearer <token>`, including anonymous/guest sessions for pre-login reads. When changing request/response shapes here, check that repo for matching client-side call sites.

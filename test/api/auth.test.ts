@@ -82,6 +82,63 @@ describe('POST /api/auth — google', () => {
     expect(__testUtils.getDoc('users', 'alice')?.subscriptionTier).toBe('explorer');
   });
 
+  it('keeps a name and picture the user changed in Settings', async () => {
+    // The regression: every sign-in wrote the provider's name and picture
+    // over the profile, so an edit lasted until the next login.
+    __testUtils.seedDoc('users', 'alice', {
+      subscriptionTier: 'explorer',
+      displayName: 'Ali',
+      photoURL: 'https://storage.example/alice-own.png',
+    });
+    __testUtils.seedAuthUser('alice', {
+      uid: 'alice',
+      email: 'alice@example.com',
+      displayName: 'Alice Google',
+      photoURL: 'https://google.example/alice.png',
+    });
+    __testUtils.setValidToken('google-id-token-alice', {
+      uid: 'alice',
+      email: 'alice@example.com',
+      name: 'Alice Google',
+      picture: 'https://google.example/alice.png',
+      email_verified: true,
+    });
+
+    const { req, res } = createMockReqRes({
+      method: 'POST',
+      body: { action: 'google', idToken: 'google-id-token-alice' },
+    });
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    const stored = __testUtils.getDoc('users', 'alice');
+    expect(stored?.displayName).toBe('Ali');
+    expect(stored?.photoURL).toBe('https://storage.example/alice-own.png');
+    expect(res.body.data.displayName).toBe('Ali');
+    expect(res.body.data.photoURL).toBe('https://storage.example/alice-own.png');
+  });
+
+  it('fills a name or picture the profile has lost from the provider', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer', displayName: '', photoURL: null });
+    __testUtils.seedAuthUser('alice', {
+      uid: 'alice',
+      email: 'alice@example.com',
+      displayName: 'Alice Google',
+      photoURL: 'https://google.example/alice.png',
+    });
+    __testUtils.setValidToken('google-id-token-alice', { uid: 'alice', email: 'alice@example.com' });
+
+    const { req, res } = createMockReqRes({
+      method: 'POST',
+      body: { action: 'google', idToken: 'google-id-token-alice' },
+    });
+    await handler(req, res);
+
+    const stored = __testUtils.getDoc('users', 'alice');
+    expect(stored?.displayName).toBe('Alice Google');
+    expect(stored?.photoURL).toBe('https://google.example/alice.png');
+  });
+
   it('returns a generic error and does not leak the internal Firebase error message on an invalid token', async () => {
     const { req, res } = createMockReqRes({
       method: 'POST',
