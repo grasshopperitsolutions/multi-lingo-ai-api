@@ -170,9 +170,29 @@ export interface TtsCacheHint {
   cacheable?: boolean;
 }
 
+/**
+ * Why the call is being made, when the reason is app maintenance rather than
+ * something the user asked for.
+ *
+ * - `ui-translation`: the frontend's translationService translating the
+ *   interface into a language — seeding a new one, filling keys added after a
+ *   deploy, an admin resync. `locale` names the language, which must exist.
+ * - `language-identify`: the one call that identifies a language a user is
+ *   adding.
+ *
+ * Both skip the user's daily allowance (see ask-ai.ts). Like `explorerModel`,
+ * no provider reads it; it rides in `providerParams` because that is already
+ * the bag of per-request choices.
+ */
+export interface MaintenancePurpose {
+  purpose?: 'ui-translation' | 'language-identify';
+  locale?: string;
+}
+
 export type ProviderParams = (OpenAIParams | PerplexityParams | GeminiParams) &
   TierModelOverride &
-  TtsCacheHint;
+  TtsCacheHint &
+  MaintenancePurpose;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';

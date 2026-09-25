@@ -575,3 +575,109 @@ describe('daily allowance comes from the Tiers screen', () => {
     expect(res.statusCode).toBe(200);
   });
 });
+
+describe('maintenance calls skip the daily allowance', () => {
+  const today = () => new Date().toISOString().slice(0, 10);
+  const ask = (providerParams: Record<string, unknown>) =>
+    createMockReqRes({
+      method: 'POST',
+      headers: bearer(TOKEN_ALICE),
+      body: { prompt: 'translate', providerParams: { provider: 'gemini', ...providerParams } },
+    });
+  const exhaustedExplorer = (extra: Record<string, unknown> = {}) =>
+    __testUtils.seedDoc('users', 'alice', {
+      subscriptionTier: 'explorer',
+      aiCallsToday: 3,
+      aiCallsDate: today(),
+      ...extra,
+    });
+
+  it('lets a UI translation for an existing language through, with the allowance spent', async () => {
+    // A free user adding a language would otherwise stop after three of its
+    // ~20 calls and leave it untranslated for everyone.
+    exhaustedExplorer();
+    __testUtils.seedDoc('appConfig/config/languages', 'is-IS', { code: 'is-IS' });
+
+    for (let i = 0; i < 20; i++) {
+      const { req, res } = ask({ purpose: 'ui-translation', locale: 'is-IS' });
+      await handler(req, res);
+      expect(res.statusCode).toBe(200);
+    }
+  });
+
+  it('lets the call that identifies a new language through', async () => {
+    exhaustedExplorer();
+    const { req, res } = ask({ purpose: 'language-identify' });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('counts a UI translation for a language that does not exist, or with no locale', async () => {
+    exhaustedExplorer();
+    for (const params of [{ purpose: 'ui-translation', locale: 'xx-XX' }, { purpose: 'ui-translation' }, { purpose: 'something-else' }]) {
+      const { req, res } = ask(params);
+      await handler(req, res);
+      expect(res.statusCode).toBe(429);
+    }
+  });
+
+  it('falls back to the normal allowance past the safety cap', async () => {
+    exhaustedExplorer({ maintenanceAiCallsToday: 300, maintenanceAiCallsDate: today() });
+    __testUtils.seedDoc('appConfig/config/languages', 'is-IS', { code: 'is-IS' });
+    const { req, res } = ask({ purpose: 'ui-translation', locale: 'is-IS' });
+    await handler(req, res);
+    expect(res.statusCode).toBe(429);
+  });
+
+  it('reports reaching the cap to the admins, once a day', async () => {
+    exhaustedExplorer({ maintenanceAiCallsToday: 300, maintenanceAiCallsDate: today(), email: 'a@x.com' });
+    __testUtils.seedDoc('appConfig/config/languages', 'is-IS', { code: 'is-IS' });
+
+    for (let i = 0; i < 3; i++) {
+      const { req, res } = ask({ purpose: 'ui-translation', locale: 'is-IS' });
+      await handler(req, res);
+      expect(res.statusCode).toBe(429);
+    }
+
+    const reports = Object.values(__testUtils.dumpCollection('appConfig/config/reports') as Record<string, any>);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ category: 'Bug / Error', reporterUid: 'alice', reporterEmail: 'a@x.com', read: false, source: 'server' });
+    expect(reports[0].message).toContain('300');
+    expect(__testUtils.getDoc('users', 'alice')).toMatchObject({ maintenanceCapReportedDate: today() });
+  });
+
+  it('reports again on a later day', async () => {
+    exhaustedExplorer({
+      maintenanceAiCallsToday: 300,
+      maintenanceAiCallsDate: today(),
+      maintenanceCapReportedDate: '2000-01-01',
+    });
+    __testUtils.seedDoc('appConfig/config/languages', 'is-IS', { code: 'is-IS' });
+    const { req, res } = ask({ purpose: 'ui-translation', locale: 'is-IS' });
+    await handler(req, res);
+    expect(Object.keys(__testUtils.dumpCollection('appConfig/config/reports') as object)).toHaveLength(1);
+  });
+
+  it('starts the cap afresh on a new day', async () => {
+    exhaustedExplorer({ maintenanceAiCallsToday: 300, maintenanceAiCallsDate: '2000-01-01' });
+    __testUtils.seedDoc('appConfig/config/languages', 'is-IS', { code: 'is-IS' });
+    const { req, res } = ask({ purpose: 'ui-translation', locale: 'is-IS' });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('does not touch the ordinary allowance counter', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    __testUtils.seedDoc('appConfig/config/languages', 'is-IS', { code: 'is-IS' });
+    for (let i = 0; i < 5; i++) {
+      const { req, res } = ask({ purpose: 'ui-translation', locale: 'is-IS' });
+      await handler(req, res);
+    }
+    // Three ordinary calls are still available afterwards.
+    for (let i = 0; i < 3; i++) {
+      const { req, res } = ask({});
+      await handler(req, res);
+      expect(res.statusCode).toBe(200);
+    }
+  });
+});

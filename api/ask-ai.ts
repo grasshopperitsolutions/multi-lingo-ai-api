@@ -8,7 +8,7 @@ import { db, FieldValue } from '../lib/firebase-admin';
 import { ttsCacheKey, readTtsClip, writeTtsClip } from '../lib/tts-cache';
 import { compressPcmToMp3 } from '../lib/mp3';
 import { logInfo, logError, startTimer } from '../lib/logger';
-import { reportError } from '../lib/sentry';
+import { reportError, reportMessage } from '../lib/sentry';
 import type { VercelRequest, VercelResponse, AskAIRequest, SubscriptionTier } from '../lib/types';
 
 /**
@@ -127,6 +127,20 @@ const ALLOWED_AUDIO_MIME = [
 const LIMITS_ENFORCED = process.env.LIMITS_ENFORCED !== 'false';
 
 /**
+ * Most allowance-exempt maintenance calls one user may make in a day.
+ *
+ * Translating the interface into a language is app maintenance, not something
+ * the user asked for, so it never spends their daily allowance — a free user
+ * adding a language would otherwise run out after three of its ~20 calls and
+ * leave it mostly untranslated for everyone. The server cannot see where a
+ * call came from, though, so the exemption is keyed to a declared purpose and
+ * this cap keeps it from being an unlimited free route: it sits far above any
+ * real seed (~20 calls, ~60 with retries), and past it calls simply count
+ * against the allowance as usual rather than being refused.
+ */
+const MAINTENANCE_DAILY_CAP = 300;
+
+/**
  * Decide whether this request may be served from, and written to, the shared
  * speech cache — and under what key.
  *
@@ -190,6 +204,62 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       durationMs: elapsed(),
     });
     return errorResponse(res, 'AI request failed', 500);
+  }
+}
+
+/**
+ * The cap above should never be reached by real use, so reaching it is either
+ * a bug in the frontend's translation code or someone labelling their own
+ * calls as translation to get free AI. Either way an admin should hear about
+ * it: an error to the logs and Sentry, and a report in the Admin › Reports
+ * queue, which the nightly digest emails to admins while it is unread.
+ *
+ * Once per user per day (`maintenanceCapReportedDate`, server-written and
+ * protected), since every further call that day would otherwise file another.
+ * Never throws: a failure to report must not fail the user's request, which
+ * simply goes on to count against their allowance.
+ */
+async function reportMaintenanceCap({
+  uid,
+  userData,
+  purpose,
+  locale,
+  today,
+}: {
+  uid: string;
+  userData: Record<string, any>;
+  purpose: string | undefined;
+  locale: string | undefined;
+  today: string;
+}) {
+  try {
+    await reportMessage(
+      'ai_maintenance_cap_reached',
+      'ask-ai',
+      `User ${uid} reached the daily cap of ${MAINTENANCE_DAILY_CAP} allowance-exempt maintenance calls`,
+      { uid, purpose, locale, cap: MAINTENANCE_DAILY_CAP }
+    );
+    await db.collection('appConfig').doc('config').collection('reports').add({
+      category: 'Bug / Error',
+      message:
+        `This user made more than ${MAINTENANCE_DAILY_CAP} interface-translation AI calls today ` +
+        `(last purpose: ${purpose ?? 'unknown'}${locale ? `, locale: ${locale}` : ''}). ` +
+        `Real use never comes close, so this is either a bug in the translation code or the ` +
+        `exemption being misused. Further calls today count against their normal daily allowance.`,
+      context: 'api/ask-ai — maintenance cap',
+      reporterUid: uid,
+      reporterEmail: userData.email ?? null,
+      reporterName: userData.displayName ?? null,
+      source: 'server',
+      read: false,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    await db.collection('users').doc(uid).set({ maintenanceCapReportedDate: today }, { merge: true });
+  } catch (err) {
+    logError('ai_maintenance_cap_report_failed', 'ask-ai', {
+      uid,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -294,8 +364,37 @@ async function _handleAskAI(
 
   const dailyLimit = resolveDailyLimit(tier, tiersSnapshot);
 
-  // null is unlimited, which is how maestro has always passed through here.
+  // ── Maintenance calls skip the allowance ─────────────────────────────────
+  //
+  // Only when a limit would apply at all, so unlimited tiers and paused
+  // limits write nothing. A `ui-translation` call must name a language that
+  // exists; past the cap it falls through to the normal allowance.
+  let isMaintenance = false;
   if (LIMITS_ENFORCED && dailyLimit !== null) {
+    const purpose = body?.providerParams?.purpose;
+    const locale = body?.providerParams?.locale;
+    let purposeHolds = purpose === 'language-identify';
+    if (purpose === 'ui-translation' && typeof locale === 'string' && /^[A-Za-z0-9-]{2,20}$/.test(locale)) {
+      const language = await db.collection('appConfig').doc('config').collection('languages').doc(locale).get();
+      purposeHolds = language.exists;
+    }
+    if (purposeHolds) {
+      const maintenanceToday: number =
+        userData.maintenanceAiCallsDate === today ? (userData.maintenanceAiCallsToday ?? 0) : 0;
+      if (maintenanceToday < MAINTENANCE_DAILY_CAP) {
+        isMaintenance = true;
+        await db.collection('users').doc(uid).set(
+          { maintenanceAiCallsToday: maintenanceToday + 1, maintenanceAiCallsDate: today },
+          { merge: true }
+        );
+      } else if (userData.maintenanceCapReportedDate !== today) {
+        await reportMaintenanceCap({ uid, userData, purpose, locale, today });
+      }
+    }
+  }
+
+  // null is unlimited, which is how maestro has always passed through here.
+  if (LIMITS_ENFORCED && dailyLimit !== null && !isMaintenance) {
     const upgradeMessage = tier === 'explorer'
       ? 'Daily AI limit reached. Upgrade to Voyager for more.'
       : tier === 'voyager'

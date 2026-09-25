@@ -54,6 +54,12 @@ export const ALWAYS_PROTECTED_USER_FIELDS = [
   'cancelAtPeriodEnd',
   'aiCallsToday',
   'aiCallsDate',
+  // The safety cap on allowance-exempt maintenance calls (ask-ai.ts): a user
+  // who could reset it could translate for free without limit.
+  'maintenanceAiCallsToday',
+  'maintenanceAiCallsDate',
+  // Set when that cap is reached and reported, so it is reported once a day.
+  'maintenanceCapReportedDate',
 ] as const;
 
 /**

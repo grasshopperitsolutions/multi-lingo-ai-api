@@ -73,6 +73,9 @@ describe('stripProtectedUserFields', () => {
       cancelAtPeriodEnd: false,
       aiCallsToday: 999,
       aiCallsDate: '2099-01-01',
+      maintenanceAiCallsToday: 0,
+      maintenanceAiCallsDate: '2099-01-01',
+      maintenanceCapReportedDate: '2099-01-01',
     };
 
     const strippedNoTier = stripProtectedUserFields(data, false);
