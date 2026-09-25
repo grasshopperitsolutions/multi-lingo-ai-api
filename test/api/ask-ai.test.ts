@@ -681,3 +681,66 @@ describe('maintenance calls skip the daily allowance', () => {
     }
   });
 });
+
+describe('the daily counter', () => {
+  const today = () => new Date().toISOString().slice(0, 10);
+  const ask = (providerParams: Record<string, unknown> = {}) =>
+    createMockReqRes({
+      method: 'POST',
+      headers: bearer(TOKEN_ALICE),
+      body: { prompt: 'hi', providerParams: { provider: 'gemini', ...providerParams } },
+    });
+
+  it('sends the server count back with every counted call', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    const { req, res } = ask();
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.usage).toEqual({ aiCallsToday: 1, aiCallsDate: today(), aiCallsPerDay: 3 });
+  });
+
+  it('marks the limit with a code the frontend can recognise, and the count', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer', aiCallsToday: 3, aiCallsDate: today() });
+    const { req, res } = ask();
+    await handler(req, res);
+    expect(res.statusCode).toBe(429);
+    expect(res.body).toMatchObject({
+      success: false,
+      code: 'DAILY_LIMIT',
+      usage: { aiCallsToday: 3, aiCallsDate: today(), aiCallsPerDay: 3 },
+    });
+  });
+
+  it('starts from zero on a new day', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer', aiCallsToday: 3, aiCallsDate: '2000-01-01' });
+    const { req, res } = ask();
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.usage.aiCallsToday).toBe(1);
+  });
+
+  it('lets exactly the allowance through when calls arrive at once', async () => {
+    // Read-then-write outside a transaction let every one of these through
+    // and counted them as one.
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    const calls = Array.from({ length: 6 }, () => ask());
+    await Promise.all(calls.map(({ req, res }) => handler(req, res)));
+
+    const statuses = calls.map(({ res }) => res.statusCode).sort();
+    expect(statuses).toEqual([200, 200, 200, 429, 429, 429]);
+    expect(__testUtils.getDoc('users', 'alice')).toMatchObject({ aiCallsToday: 3 });
+  });
+
+  it('sends no usage for a call that did not count', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    const unlimited = ask();
+    await handler(unlimited.req, unlimited.res);
+    expect(unlimited.res.body.data.usage).toBeUndefined();
+
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    __testUtils.seedDoc('appConfig/config/languages', 'is-IS', { code: 'is-IS' });
+    const exempt = ask({ purpose: 'ui-translation', locale: 'is-IS' });
+    await handler(exempt.req, exempt.res);
+    expect(exempt.res.body.data.usage).toBeUndefined();
+  });
+});

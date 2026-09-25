@@ -394,6 +394,10 @@ async function _handleAskAI(
   }
 
   // null is unlimited, which is how maestro has always passed through here.
+  //
+  // `usage` is sent back with a counted call, so the frontend's meter shows
+  // the server's number instead of the one it read at page load.
+  let usage: { aiCallsToday: number; aiCallsDate: string; aiCallsPerDay: number } | null = null;
   if (LIMITS_ENFORCED && dailyLimit !== null && !isMaintenance) {
     const upgradeMessage = tier === 'explorer'
       ? 'Daily AI limit reached. Upgrade to Voyager for more.'
@@ -401,19 +405,33 @@ async function _handleAskAI(
         ? 'Daily AI limit reached. Upgrade to Maestro for unlimited access.'
         : 'Daily AI limit reached.';
 
-    const callsDate: string = userData.aiCallsDate ?? '';
-    const callsToday: number = callsDate === today ? (userData.aiCallsToday ?? 0) : 0;
+    // Check and increment in one transaction. Reading the count off the
+    // profile fetched above and writing it back later let several calls
+    // fired at once all read the same number: each got through, and the
+    // counter rose by one for all of them.
+    const userRef = db.collection('users').doc(uid);
+    const outcome: { allowed: boolean; callsToday: number } = await db.runTransaction(async (tx: any) => {
+      const snap = await tx.get(userRef);
+      const current = snap.data() ?? {};
+      const callsToday: number = current.aiCallsDate === today ? (current.aiCallsToday ?? 0) : 0;
+      if (callsToday >= dailyLimit) return { allowed: false, callsToday };
+      tx.set(
+        userRef,
+        { aiCallsToday: callsToday + 1, aiCallsDate: today, updatedAt: FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+      return { allowed: true, callsToday: callsToday + 1 };
+    });
 
-    if (callsToday >= dailyLimit) {
-      return errorResponse(res, upgradeMessage, 429);
+    if (!outcome.allowed) {
+      // The code and the numbers let the frontend show its own translated
+      // message and correct its meter; the English text is for everyone else.
+      return errorResponse(res, upgradeMessage, 429, {
+        code: 'DAILY_LIMIT',
+        usage: { aiCallsToday: outcome.callsToday, aiCallsDate: today, aiCallsPerDay: dailyLimit },
+      });
     }
-
-    // Increment counter before proceeding to avoid a race that lets
-    // concurrent requests slip past the daily limit.
-    await db.collection('users').doc(uid).set(
-      { aiCallsToday: callsToday + 1, aiCallsDate: today, updatedAt: FieldValue.serverTimestamp() },
-      { merge: true }
-    );
+    usage = { aiCallsToday: outcome.callsToday, aiCallsDate: today, aiCallsPerDay: dailyLimit };
   }
   // A tier with no configured allowance — maestro, by default — falls through
   // LIMITS_ENFORCED=false: no limit, no counter write — falls through
@@ -572,7 +590,7 @@ async function _handleAskAI(
       messageCount,
     });
 
-    return successResponse(res, result);
+    return successResponse(res, usage ? { ...result, usage } : result);
   } catch (err: any) {
     const upstreamStatus: number =
       err?.status ?? err?.response?.status ?? err?.statusCode ?? 500;

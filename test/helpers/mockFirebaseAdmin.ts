@@ -192,8 +192,26 @@ function makeCollectionRef(path: string): any {
   };
 }
 
+let transactionChain: Promise<unknown> = Promise.resolve();
+
 export const db: any = {
   collection: (name: string) => makeCollectionRef(name),
+  // Enough of Firestore's transaction API for handlers that check-then-write.
+  // Transactions run one after another, which is the guarantee real Firestore
+  // gives through contention retries: without that, awaiting the read would
+  // let concurrent handlers interleave and the mock could not show a race
+  // being prevented.
+  runTransaction: (fn: (tx: any) => Promise<unknown>) => {
+    const run = transactionChain.then(() =>
+      fn({
+        get: (ref: any) => ref.get(),
+        set: (ref: any, data: Record<string, unknown>, options?: unknown) => ref.set(data, options),
+        update: (ref: any, data: Record<string, unknown>) => ref.update(data),
+      })
+    );
+    transactionChain = run.catch(() => undefined);
+    return run;
+  },
   doc: (path: string) => {
     const parts = path.split('/');
     const id = parts.pop()!;
