@@ -390,3 +390,63 @@ describe('method handling', () => {
     expect(res.statusCode).toBe(405);
   });
 });
+
+describe('webhook — plan changes for Admin › Pulse', () => {
+  const counters = () => fbUtils.getDoc('appConfig/pulse/counters', new Date().toISOString().slice(0, 10)) as any;
+  const deliver = async (event: any) => {
+    stripeUtils.setWebhookEvent(event);
+    const { req, res } = createMockReqRes({
+      method: 'POST',
+      headers: { 'stripe-signature': 'valid-sig' },
+      rawBody: JSON.stringify({ type: event.type }),
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+  };
+  const subscription = (priceId: string, extra: Record<string, unknown> = {}) => ({
+    id: 'sub_1',
+    customer: 'cus_alice',
+    status: 'active',
+    cancel_at_period_end: false,
+    items: { data: [{ price: { id: priceId, recurring: { interval: 'month' } } }] },
+    ...extra,
+  });
+
+  beforeEach(() => {
+    stripeUtils.seedCustomer('cus_alice', { metadata: { firebaseUid: 'alice' } });
+    fbUtils.seedDoc('users', 'alice', {
+      email: 'alice@example.com', subscriptionTier: 'explorer', stripeCustomerId: 'cus_alice',
+    });
+  });
+
+  it('records a new subscription on its event and in the counters', async () => {
+    stripeUtils.seedSubscription('sub_1', subscription('price_voyager_monthly'));
+    await deliver({
+      id: 'evt_new', type: 'checkout.session.completed',
+      data: { object: { mode: 'subscription', customer: 'cus_alice', subscription: 'sub_1', metadata: { firebaseUid: 'alice' } } },
+    });
+
+    expect((fbUtils.getDoc('stripeEvents', 'evt_new') as any).planChange).toEqual({
+      direction: 'new', fromTier: 'explorer', toTier: 'voyager', interval: 'month',
+    });
+    expect(counters().planChanges).toEqual({ new: 1 });
+  });
+
+  it('records an upgrade, a scheduled cancellation and a cancellation — and ignores a renewal', async () => {
+    fbUtils.seedDoc('users', 'alice', {
+      email: 'alice@example.com', subscriptionTier: 'voyager', stripeCustomerId: 'cus_alice',
+    });
+
+    await deliver({ id: 'evt_up', type: 'customer.subscription.updated', data: { object: subscription('price_maestro_monthly') } });
+    await deliver({ id: 'evt_renew', type: 'customer.subscription.updated', data: { object: subscription('price_maestro_monthly') } });
+    await deliver({
+      id: 'evt_sched', type: 'customer.subscription.updated',
+      data: { object: subscription('price_maestro_monthly', { cancel_at_period_end: true }) },
+    });
+    await deliver({ id: 'evt_gone', type: 'customer.subscription.deleted', data: { object: subscription('price_maestro_monthly') } });
+
+    expect(counters().planChanges).toEqual({ upgrade: 1, cancelScheduled: 1, cancel: 1 });
+    expect(counters().planMoves).toEqual({ voyager_to_maestro: 1, maestro_to_explorer: 1 });
+    expect((fbUtils.getDoc('stripeEvents', 'evt_renew') as any).planChange).toBeUndefined();
+  });
+});

@@ -3,6 +3,7 @@ import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuthSession } from '../lib/verify-auth';
 import { db } from '../lib/firebase-admin';
 import { getUserTier } from '../lib/require-admin';
+import { bump, safeKey } from '../lib/pulse';
 import { logInfo, logWarn, startTimer } from '../lib/logger';
 import { reportError, reportMessage } from '../lib/sentry';
 import type { VercelRequest, VercelResponse } from '../lib/types';
@@ -187,6 +188,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Not 401: they are who they say they are, their plan simply does not
       // include this. The client turns a 403 here into the upgrade prompt.
       logInfo('live_token_denied', 'live-token', { uid, tier: tierId, ms: elapsed() });
+      await bump([[['locked', FEATURE_KEY, safeKey(tierId ?? 'none')], 1]]);
       return errorResponse(res, 'Your plan does not include live conversation', 403);
     }
 
@@ -288,6 +290,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       );
       return errorResponse(res, 'Could not start a conversation right now', 502);
     }
+
+    // A session started, which is the one quantity this server can count —
+    // minutes are only ever reported by the browser (see api/auth.ts, pulse).
+    await bump([[['liveSessions', safeKey(tierId ?? 'none')], 1]]);
 
     logInfo('live_token_minted', 'live-token', {
       uid,

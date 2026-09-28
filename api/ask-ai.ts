@@ -4,6 +4,7 @@ import { verifyAuth } from '../lib/verify-auth';
 import { askOpenAI } from '../lib/providers/openai';
 import { askPerplexity } from '../lib/providers/perplexity';
 import { askGemini } from '../lib/providers/gemini';
+import { bump, resolveKnownId, safeKey } from '../lib/pulse';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { ttsCacheKey, readTtsClip, writeTtsClip } from '../lib/tts-cache';
 import { compressPcmToMp3 } from '../lib/mp3';
@@ -308,6 +309,18 @@ async function _handleAskAI(
 
   const body = req.body as AskAIRequest;
 
+  // ── Which feature this call is for (Pulse) ──────────────────────────────
+  //
+  // The frontend names the prompt document the call was built from. It is
+  // only a label for the counters, never trusted for anything else, and it is
+  // removed before the parameters reach a provider. An id that is not a
+  // prompt document counts as "other", so no caller can invent counter keys.
+  const feature = await resolveKnownId(body?.providerParams?.feature, 'prompts');
+  if (body?.providerParams) delete body.providerParams.feature;
+  // The real subscription, as the model swap below uses it — not the quota
+  // tier, which paused limits pin to explorer for everyone.
+  const pulseTier = safeKey(userData.subscriptionTier ?? 'explorer');
+
   // ── The Explorer model swap ──────────────────────────────────────────────
   //
   // The request carries two candidates — `model` and `explorerModel` — both
@@ -349,6 +362,8 @@ async function _handleAskAI(
         statusCode: 200,
         durationMs: elapsed(),
       });
+
+      await bump([[['ai', feature, pulseTier, 'cached'], 1]]);
 
       return successResponse(res, {
         text: '',
@@ -424,6 +439,11 @@ async function _handleAskAI(
     });
 
     if (!outcome.allowed) {
+      // An upsell signal: who hit the wall, and doing what.
+      await bump([
+        [['limitHits', pulseTier], 1],
+        [['ai', feature, pulseTier, 'refused'], 1],
+      ]);
       // The code and the numbers let the frontend show its own translated
       // message and correct its meter; the English text is for everyone else.
       return errorResponse(res, upgradeMessage, 429, {
@@ -578,6 +598,19 @@ async function _handleAskAI(
       }
     }
 
+    const { tokens, ...publicResult } = result;
+    const modelKey = safeKey(result.model ?? model);
+    await bump([
+      [['ai', feature, pulseTier, 'calls'], 1],
+      [['ai', feature, pulseTier, 'inputTokens'], tokens?.input ?? 0],
+      [['ai', feature, pulseTier, 'outputTokens'], tokens?.output ?? 0],
+      [['ai', feature, pulseTier, 'thinkingTokens'], tokens?.thinking ?? 0],
+      [['models', modelKey, 'calls'], 1],
+      [['models', modelKey, 'inputTokens'], tokens?.input ?? 0],
+      [['models', modelKey, 'outputTokens'], tokens?.output ?? 0],
+      [['models', modelKey, 'thinkingTokens'], tokens?.thinking ?? 0],
+    ]);
+
     logInfo('ai_request_complete', 'ask-ai', {
       uid,
       method: req.method,
@@ -590,7 +623,7 @@ async function _handleAskAI(
       messageCount,
     });
 
-    return successResponse(res, usage ? { ...result, usage } : result);
+    return successResponse(res, usage ? { ...publicResult, usage } : publicResult);
   } catch (err: any) {
     const upstreamStatus: number =
       err?.status ?? err?.response?.status ?? err?.statusCode ?? 500;
@@ -613,6 +646,8 @@ async function _handleAskAI(
     // rejected prompt, a context overflow. Those belong in the logs, not in
     // an alert. Anything 5xx (or unrecognized, which defaults to 500) means
     // the provider broke or we did, and that is worth waking up for.
+    await bump([[['ai', feature, pulseTier, 'errors'], 1]]);
+
     if (httpStatus >= 500) {
       await reportError('ai_request_error', 'ask-ai', err, extra);
     } else {

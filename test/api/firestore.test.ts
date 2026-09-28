@@ -769,3 +769,57 @@ describe("server-only collections (contact submissions, Stripe events)", () => {
     expect(res.body.data.documents).toHaveLength(1);
   });
 });
+
+describe('Admin › Pulse documents are admin-read only', () => {
+  // Written by the Admin SDK with no createdBy, so without an explicit policy
+  // they would read as unowned, shared content — visible to any signed-in
+  // caller, anonymous guests included.
+  beforeEach(() => {
+    __testUtils.seedDoc('appConfig/pulse/counters', '2026-09-28', { activeUsers: { total: 3 } });
+    __testUtils.seedDoc('appConfig/pulse/days', '2026-09-27', { users: { total: 3 } });
+    __testUtils.seedDoc('appConfig/pulse/weeks', '2026-W40', { active: 3 });
+  });
+
+  it.each(['counters', 'days', 'weeks'])('refuses a non-admin query of %s', async (name) => {
+    const { req, res } = createMockReqRes({
+      method: 'GET', headers: bearer(TOKEN_ALICE), query: { collection: `appConfig/pulse/${name}`, filters: '[]' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('refuses a non-admin single-document read', async () => {
+    const { req, res } = createMockReqRes({
+      method: 'GET', headers: bearer(TOKEN_ALICE), query: { collection: 'appConfig/pulse/counters', id: '2026-09-28' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('lets an admin read them', async () => {
+    const { req, res } = createMockReqRes({
+      method: 'GET', headers: bearer(TOKEN_ADMIN), query: { collection: 'appConfig/pulse/counters', filters: '[]' },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.documents).toHaveLength(1);
+  });
+
+  it('keeps a user from writing their own acquisition or active marker', async () => {
+    __testUtils.seedDoc('users', 'alice', { email: 'alice@example.com', acquisition: { utmSource: 'real' } });
+    const { req, res } = createMockReqRes({
+      method: 'PUT',
+      headers: bearer(TOKEN_ALICE),
+      body: {
+        collection: 'users', id: 'alice',
+        data: { acquisition: { utmSource: 'fake' }, pulseSeen: { day: '1999-01-01' }, displayName: 'Alice' },
+      },
+    });
+    await handler(req, res);
+    expect(res.statusCode).toBe(200);
+    const stored = __testUtils.getDoc('users', 'alice') as any;
+    expect(stored.acquisition).toEqual({ utmSource: 'real' });
+    expect(stored.pulseSeen).toBeUndefined();
+    expect(stored.displayName).toBe('Alice');
+  });
+});

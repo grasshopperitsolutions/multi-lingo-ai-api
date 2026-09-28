@@ -189,10 +189,20 @@ export interface MaintenancePurpose {
   locale?: string;
 }
 
+/**
+ * The prompt document a call was built from, for the Pulse counters. A label
+ * only: ask-ai resolves it against the prompts collection and deletes it
+ * before the parameters reach a provider.
+ */
+export interface PulseFeature {
+  feature?: string;
+}
+
 export type ProviderParams = (OpenAIParams | PerplexityParams | GeminiParams) &
   TierModelOverride &
   TtsCacheHint &
-  MaintenancePurpose;
+  MaintenancePurpose &
+  PulseFeature;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -262,6 +272,12 @@ export interface AskAIResponse {
    * merely malformed — the two need different remedies.
    */
   finishReason?: string;
+  /**
+   * Token counts from the provider, when it reports them. Server-side only:
+   * ask-ai records them in the Pulse counters and strips them from the
+   * response, whose `usage` key already means the daily allowance.
+   */
+  tokens?: { input: number; output: number; thinking: number };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

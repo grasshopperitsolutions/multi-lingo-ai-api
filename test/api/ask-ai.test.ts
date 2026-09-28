@@ -744,3 +744,81 @@ describe('the daily counter', () => {
     expect(exempt.res.body.data.usage).toBeUndefined();
   });
 });
+
+describe('POST /api/ask-ai — Pulse counters', () => {
+  const day = () => new Date().toISOString().slice(0, 10);
+  const counters = () => __testUtils.getDoc('appConfig/pulse/counters', day()) as any;
+  const askFor = (feature?: string, provider = 'gemini') =>
+    createMockReqRes({
+      method: 'POST',
+      headers: bearer(TOKEN_ALICE),
+      body: { prompt: 'hi', providerParams: { provider, ...(feature ? { feature } : {}) } },
+    });
+
+  beforeEach(async () => {
+    const { __resetKnownIds } = await import('../../lib/pulse');
+    __resetKnownIds();
+    __testUtils.seedDoc('appConfig/config/prompts', 'story-generate-prompt', { template: 'x' });
+  });
+
+  it('counts the call and its tokens under the prompt it was built from and the real tier', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    vi.mocked(askGemini).mockResolvedValueOnce({
+      text: 'ok', provider: 'gemini', model: 'gemini-3.5-flash-lite',
+      tokens: { input: 100, output: 40, thinking: 7 },
+    } as any);
+
+    const { req, res } = askFor('story-generate-prompt');
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(counters().ai['story-generate-prompt'].maestro).toEqual({
+      calls: 1, inputTokens: 100, outputTokens: 40, thinkingTokens: 7,
+    });
+    expect(counters().models['gemini-3_5-flash-lite'].calls).toBe(1);
+  });
+
+  it('never sends the label to the provider, nor the token counts back to the browser', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    vi.mocked(askGemini).mockResolvedValueOnce({
+      text: 'ok', provider: 'gemini', model: 'm', tokens: { input: 1, output: 1, thinking: 0 },
+    } as any);
+
+    const { req, res } = askFor('story-generate-prompt');
+    await handler(req, res);
+
+    expect(vi.mocked(askGemini).mock.calls[0][1]).not.toHaveProperty('feature');
+    expect(res.body.data).not.toHaveProperty('tokens');
+  });
+
+  it('files an unknown label under "other" and a missing one under "unspecified"', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+
+    await handler(askFor('invented-prompt').req, createMockReqRes({}).res);
+    await handler(askFor().req, createMockReqRes({}).res);
+
+    expect(Object.keys(counters().ai).sort()).toEqual(['other', 'unspecified']);
+  });
+
+  it('counts a refusal at the daily limit as an upsell signal', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer', aiCallsToday: 3, aiCallsDate: day() });
+
+    const { req, res } = askFor('story-generate-prompt');
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(429);
+    expect(counters().limitHits).toEqual({ explorer: 1 });
+    expect(counters().ai['story-generate-prompt'].explorer).toEqual({ refused: 1 });
+  });
+
+  it('counts a provider failure, and still fails the request as before', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    vi.mocked(askGemini).mockRejectedValueOnce(Object.assign(new Error('rate limited'), { status: 429 }));
+
+    const { req, res } = askFor('story-generate-prompt');
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(429);
+    expect(counters().ai['story-generate-prompt'].maestro).toEqual({ errors: 1 });
+  });
+});

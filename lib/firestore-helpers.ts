@@ -60,6 +60,12 @@ export const ALWAYS_PROTECTED_USER_FIELDS = [
   'maintenanceAiCallsDate',
   // Set when that cap is reached and reported, so it is reported once a day.
   'maintenanceCapReportedDate',
+  // Admin › Pulse. `acquisition` is written once, at sign-up, from what the
+  // browser kept since landing; `pulseSeen` is the day and week this user was
+  // last counted active. Editable by the user, the first could be rewritten
+  // after the fact and the second would let one person count every day twice.
+  'acquisition',
+  'pulseSeen',
 ] as const;
 
 /**

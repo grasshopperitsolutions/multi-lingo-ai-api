@@ -55,6 +55,20 @@ export const stripe: any = {
       }
       return s;
     }),
+    /**
+     * Enough of a list for `for await`: the real one is an auto-paging
+     * iterator over every page.
+     */
+    list: vi.fn((params: { status?: string } = {}) => {
+      const all = [...subscriptions.values()].filter(
+        (s) => !params.status || params.status === 'all' || s.status === params.status
+      );
+      return {
+        async *[Symbol.asyncIterator]() {
+          for (const s of all) yield s;
+        },
+      };
+    }),
     cancel: vi.fn(async (id: string) => {
       subscriptions.delete(id);
       return { id, status: 'canceled' };

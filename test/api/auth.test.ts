@@ -276,3 +276,82 @@ describe('POST /api/auth — interfaceLang seeding', () => {
     expect(__testUtils.getDoc('users', 'newbie')?.interfaceLang).toBe('fr-FR');
   });
 });
+
+describe('Admin › Pulse', () => {
+  const today = () => new Date().toISOString().slice(0, 10);
+  const counters = () => __testUtils.getDoc('appConfig/pulse/counters', today()) as any;
+  const pulse = (token: string | null, events: unknown) =>
+    createMockReqRes({ method: 'POST', headers: token ? bearer(token) : {}, body: { action: 'pulse', events } });
+
+  it('counts what a signed-in user reports', async () => {
+    const { req, res } = pulse(TOKEN_ALICE, [{ type: 'active' }, { type: 'liveSeconds', seconds: 30 }]);
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.counted).toBe(2);
+    expect(counters().activeUsers).toEqual({ total: 1, explorer: 1 });
+    expect(counters().liveSeconds).toEqual({ explorer: 30 });
+  });
+
+  it('requires a session, refuses guests, and bounds the batch', async () => {
+    __testUtils.setValidToken('token-guest', { uid: 'guest1', firebase: { sign_in_provider: 'anonymous' } });
+
+    const noSession = pulse(null, [{ type: 'active' }]);
+    await handler(noSession.req, noSession.res);
+    expect(noSession.res.statusCode).toBe(401);
+
+    const guest = pulse('token-guest', [{ type: 'active' }]);
+    await handler(guest.req, guest.res);
+    expect(guest.res.statusCode).toBe(403);
+
+    const tooMany = pulse(TOKEN_ALICE, Array.from({ length: 21 }, () => ({ type: 'active' })));
+    await handler(tooMany.req, tooMany.res);
+    expect(tooMany.res.statusCode).toBe(400);
+
+    const notArray = pulse(TOKEN_ALICE, 'active');
+    await handler(notArray.req, notArray.res);
+    expect(notArray.res.statusCode).toBe(400);
+
+    expect(counters()).toBeUndefined();
+  });
+
+  it('stores where a new user came from, cleaned, once', async () => {
+    __testUtils.setValidToken('google-id-token-new', { uid: 'newbie', email: 'n@example.com', email_verified: true });
+    const signIn = (acquisition: unknown) =>
+      createMockReqRes({ method: 'POST', body: { action: 'google', idToken: 'google-id-token-new', acquisition } });
+
+    const first = signIn({ referrerHost: 'www.google.com', utmSource: 'newsletter', landingPath: '/pricing?x=1' });
+    await handler(first.req, first.res);
+    expect(__testUtils.getDoc('users', 'newbie')?.acquisition).toEqual({
+      referrerHost: 'www.google.com', utmSource: 'newsletter', landingPath: '/pricing',
+    });
+
+    // A returning sign-in never rewrites first touch.
+    const again = signIn({ referrerHost: 'evil.example' });
+    await handler(again.req, again.res);
+    expect((__testUtils.getDoc('users', 'newbie')?.acquisition as any).referrerHost).toBe('www.google.com');
+  });
+
+  it('stores nothing for a sign-up with no usable acquisition', async () => {
+    __testUtils.setValidToken('google-id-token-plain', { uid: 'plain', email: 'p@example.com', email_verified: true });
+    const { req, res } = createMockReqRes({
+      method: 'POST', body: { action: 'google', idToken: 'google-id-token-plain', acquisition: { referrerHost: '' } },
+    });
+    await handler(req, res);
+    expect(__testUtils.getDoc('users', 'plain')).not.toHaveProperty('acquisition');
+  });
+
+  it('counts an account deletion, and who asked for it', async () => {
+    const self = createMockReqRes({ method: 'DELETE', headers: bearer(TOKEN_ALICE) });
+    await handler(self.req, self.res);
+    expect(counters().accountDeletions).toEqual({ self: 1 });
+  });
+
+  it('does not count a deletion that failed', async () => {
+    vi.mocked(auth.deleteUser).mockRejectedValueOnce(new Error('auth down'));
+    const { req, res } = createMockReqRes({ method: 'DELETE', headers: bearer(TOKEN_ALICE) });
+    await handler(req, res);
+    expect(res.statusCode).toBe(500);
+    expect(counters()).toBeUndefined();
+  });
+});

@@ -1,7 +1,8 @@
 import { auth, db, FieldValue } from '../lib/firebase-admin';
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
-import { verifyAuth } from '../lib/verify-auth';
+import { verifyAuth, verifyAuthSession } from '../lib/verify-auth';
+import { bump, cleanAcquisition, recordClientEvents, MAX_CLIENT_EVENTS } from '../lib/pulse';
 import { requireAdmin } from '../lib/require-admin';
 import { deleteUserAccount } from '../lib/delete-user-account';
 import { logInfo, logError, startTimer } from '../lib/logger';
@@ -67,6 +68,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     try {
       await deleteUserAccount(targetUid);
 
+      // Counted after the deletion succeeds, never before: a failed deletion
+      // is not a lost user. Who asked is the only detail kept.
+      await bump([[['accountDeletions', targetUid === uid ? 'self' : 'admin'], 1]]);
+
       logInfo('account_deleted', 'auth', {
         uid,
         targetUid,
@@ -112,6 +117,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     switch (action) {
+      /**
+       * Counts the browser reports for Admin › Pulse: that the user was here
+       * today, which pages they opened, which locked features they reached
+       * for, and how long a live conversation lasted. Counts only — see
+       * recordClientEvents in lib/pulse.ts. Guests are not counted: an
+       * anonymous uid is minted per browser and would count one visitor many
+       * times over.
+       */
+      case 'pulse': {
+        const session = await verifyAuthSession(req, res);
+        if (!session) return;
+        if (session.isAnonymous) {
+          return errorResponse(res, 'Sign in to report usage', 403);
+        }
+        const events = req.body.events;
+        if (!Array.isArray(events) || events.length === 0 || events.length > MAX_CLIENT_EVENTS) {
+          return errorResponse(res, `events must be an array of 1 to ${MAX_CLIENT_EVENTS} entries`, 400);
+        }
+        const counted = await recordClientEvents(session.uid, events);
+        return successResponse(res, { counted });
+      }
+
       case 'logout': {
         logInfo('user_logout', 'auth', { method: req.method, statusCode: 200 });
         return successResponse(res, { message: 'Logged out successfully' });
@@ -182,7 +209,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const profile = userDocSnap.exists ? userDocSnap.data() ?? {} : {};
 
         if (!userDocSnap.exists) {
+          // Where they came from, kept by the browser since they landed:
+          // a referrer hostname and campaign tags, set once and never again.
+          const acquisition = cleanAcquisition(req.body.acquisition);
           await userDocRef.set({
+            ...(acquisition ? { acquisition } : {}),
             email: userRecord.email,
             displayName: accountName,
             photoURL: accountPhoto,

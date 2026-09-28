@@ -387,3 +387,30 @@ describe('when it cannot mint', () => {
     expect(res.statusCode).toBe(405);
   });
 });
+
+describe('Pulse counters', () => {
+  const counters = () => __testUtils.getDoc('appConfig/pulse/counters', new Date().toISOString().slice(0, 10)) as any;
+
+  it('counts a session started, by tier', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    seedTiers({ maestro: ['ai_tutor'] });
+
+    const { req, res } = post();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(counters().liveSessions).toEqual({ maestro: 1 });
+  });
+
+  it('counts a refused attempt as a locked-feature attempt', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
+    seedTiers({ explorer: [] });
+
+    const { req, res } = post();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(403);
+    expect(counters().locked).toEqual({ ai_tutor: { explorer: 1 } });
+    expect(counters().liveSessions).toBeUndefined();
+  });
+});

@@ -109,6 +109,14 @@ export const EXACT_PATH_POLICIES: Record<string, CollectionPolicy> = {
   // tier in the Users panel, which is what the tutors policy below gates on.
   'appConfig/config/tutorApplications': { read: 'admin', write: 'owner-or-admin' },
 
+  // Admin › Pulse (lib/pulse.ts). Written only by the Admin SDK, so these
+  // documents carry no createdBy — under the default policy they would read
+  // as unowned, shared content, visible to any signed-in caller including an
+  // anonymous guest. Counts only, but still nobody's business but an admin's.
+  'appConfig/pulse/counters': { read: 'admin', write: 'admin' },
+  'appConfig/pulse/weeks': { read: 'admin', write: 'admin' },
+  'appConfig/pulse/days': { read: 'admin', write: 'admin' },
+
   'appConfig/config/features': { read: 'public', write: 'admin' },
   'appConfig/config/tiersConfig': { read: 'public', write: 'admin' },
 };

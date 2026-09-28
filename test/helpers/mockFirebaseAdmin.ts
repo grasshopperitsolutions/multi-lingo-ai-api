@@ -9,7 +9,12 @@ import { vi } from 'vitest';
 
 const SERVER_TIMESTAMP = '__SERVER_TIMESTAMP__';
 
-/** Merges `patch` into `base`, resolving FieldValue sentinels (arrayRemove). */
+/**
+ * Merges `patch` into `base`, resolving FieldValue sentinels (arrayRemove,
+ * increment). Plain-object values merge recursively, as a real
+ * `set(..., { merge: true })` merges nested maps — the Pulse counters depend
+ * on that, writing `{ ai: { feature: { calls: increment(1) } } }`.
+ */
 function applyFieldValues(
   base: Record<string, unknown>,
   patch: Record<string, unknown>
@@ -23,11 +28,18 @@ function applyFieldValues(
       result[key] = current.filter((item) => !remove.includes(item));
     } else if (typeof increment === 'number') {
       result[key] = (typeof result[key] === 'number' ? (result[key] as number) : 0) + increment;
+    } else if (isPlainObject(value)) {
+      result[key] = applyFieldValues(isPlainObject(result[key]) ? (result[key] as Record<string, unknown>) : {}, value);
     } else {
       result[key] = value;
     }
   }
   return result;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
 }
 
 // collectionPath (e.g. "users" or "users/uid1/notes") -> docId -> data
@@ -142,7 +154,9 @@ function makeDocRef(path: string, id: string): any {
       if (opts?.merge && map.has(id)) {
         map.set(id, applyFieldValues(map.get(id)!, data));
       } else {
-        map.set(id, { ...data });
+        // Sentinels resolve against nothing on a fresh document, as in the
+        // real SDK: increment(n) on a missing field is n.
+        map.set(id, applyFieldValues({}, data));
       }
     },
     async create(data: Record<string, unknown>) {
@@ -207,6 +221,38 @@ let transactionChain: Promise<unknown> = Promise.resolve();
 
 export const db: any = {
   collection: (name: string) => makeCollectionRef(name),
+  /**
+   * Every document in every collection whose last segment is `name`. Each
+   * snapshot doc carries `ref.parent.parent.id` — the owning document — which
+   * is what the Pulse snapshot reads to count distinct owners.
+   */
+  collectionGroup: (name: string) => ({
+    select: () => db.collectionGroup(name),
+    async get() {
+      const docs: any[] = [];
+      for (const [path, map] of store.entries()) {
+        const segments = path.split('/');
+        if (segments[segments.length - 1] !== name) continue;
+        for (const [id, data] of map.entries()) {
+          docs.push({
+            id,
+            data: () => ({ ...data }),
+            ref: {
+              path: `${path}/${id}`,
+              parent: {
+                id: name,
+                path,
+                parent: segments.length >= 3
+                  ? { id: segments[segments.length - 2], path: segments.slice(0, -1).join('/') }
+                  : null,
+              },
+            },
+          });
+        }
+      }
+      return { empty: docs.length === 0, size: docs.length, docs };
+    },
+  }),
   // Enough of Firestore's transaction API for handlers that check-then-write.
   // Transactions run one after another, which is the guarantee real Firestore
   // gives through contention retries: without that, awaiting the read would
@@ -287,6 +333,8 @@ export const auth: any = {
     return record;
   }),
   createCustomToken: vi.fn(async (uid: string) => `custom-token-for-${uid}`),
+  /** One page holds everyone; the real API pages by 1000. */
+  listUsers: vi.fn(async () => ({ users: [...authUsers.values()], pageToken: undefined })),
   deleteUser: vi.fn(async (uid: string) => {
     authUsers.delete(uid);
   }),

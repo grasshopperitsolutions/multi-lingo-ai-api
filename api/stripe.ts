@@ -8,6 +8,8 @@ import { stripe } from '../lib/stripe';
 import { logInfo, logWarn, startTimer } from '../lib/logger';
 import { reportError } from '../lib/sentry';
 import { syncTutorPublication } from '../lib/tutors';
+import { planDirection, recordPlanChange } from '../lib/pulse';
+import { tierFromPriceId } from '../lib/stripe-plans';
 import { sendEmailSafe } from '../lib/email';
 import { getEmailCopy } from '../lib/email-copy';
 import {
@@ -64,20 +66,6 @@ const TRIAL_DAYS_BY_PLAN: Record<string, number> = {};
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Maps a Stripe Price ID to an internal subscription tier. */
-function tierFromPriceId(priceId: string): SubscriptionTier {
-  const voyagerPrices = [
-    process.env.STRIPE_PRICE_VOYAGER_MONTHLY,
-    process.env.STRIPE_PRICE_VOYAGER_YEARLY,
-  ];
-  const maestroPrices = [
-    process.env.STRIPE_PRICE_MAESTRO_MONTHLY,
-    process.env.STRIPE_PRICE_MAESTRO_YEARLY,
-  ];
-  if (voyagerPrices.includes(priceId)) return 'voyager';
-  if (maestroPrices.includes(priceId)) return 'maestro';
-  return 'explorer';
-}
 
 /** Looks up the Firebase UID for a given Stripe Customer ID. */
 async function uidFromCustomerId(customerId: string): Promise<string | null> {
@@ -413,6 +401,8 @@ async function handleWebhook(
         break;
       }
 
+      const tierBeforeCheckout = (await db.collection('users').doc(uid).get()).data()?.subscriptionTier;
+
       await db.collection('users').doc(uid).set({
         subscriptionTier: tier,
         stripeCustomerId: customerId,
@@ -428,6 +418,16 @@ async function handleWebhook(
       await syncTutorPublication(uid, tier);
 
       logInfo('stripe_webhook_activated', 'stripe', { uid, tier, subscriptionId, durationMs: elapsed() });
+
+      const checkoutDirection = planDirection(tierBeforeCheckout, tier);
+      if (checkoutDirection) {
+        await recordPlanChange(event.id, {
+          direction: checkoutDirection,
+          from: tierBeforeCheckout,
+          to: tier,
+          interval: subscription.items.data[0]?.price.recurring?.interval,
+        });
+      }
 
       const recipient = await recipientFor(uid);
       if (recipient) {
@@ -457,6 +457,11 @@ async function handleWebhook(
       // from a routine update is to compare with the stored value.
       const recipient = await recipientFor(uid);
       const wasCancelScheduled = recipient?.before.cancelAtPeriodEnd === true;
+      // Also before the write, for Pulse: recipientFor returns null for a
+      // profile without an email, and the tier must be read before it changes.
+      const tierBeforeUpdate = recipient
+        ? recipient.before.subscriptionTier
+        : (await db.collection('users').doc(uid).get()).data()?.subscriptionTier;
 
       await db.collection('users').doc(uid).set({
         subscriptionTier: tier,
@@ -471,6 +476,21 @@ async function handleWebhook(
       }, { merge: true });
 
       await syncTutorPublication(uid, tier);
+
+      // A renewal changes nothing worth counting. A tier change, or the
+      // cancellation switch flipping either way, does.
+      const updateDirection = planDirection(tierBeforeUpdate, tier)
+        ?? (subscription.cancel_at_period_end && !wasCancelScheduled ? 'cancelScheduled'
+          : !subscription.cancel_at_period_end && wasCancelScheduled ? 'resumed'
+          : null);
+      if (updateDirection) {
+        await recordPlanChange(event.id, {
+          direction: updateDirection,
+          from: tierBeforeUpdate,
+          to: tier,
+          interval: subscription.items.data[0]?.price.recurring?.interval,
+        });
+      }
 
       logInfo('stripe_webhook_updated', 'stripe', { uid, tier, status: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end, durationMs: elapsed() });
 
@@ -494,6 +514,8 @@ async function handleWebhook(
       const uid = await uidFromCustomerId(subscription.customer as string);
       if (!uid) break;
 
+      const tierBeforeCancel = (await db.collection('users').doc(uid).get()).data()?.subscriptionTier;
+
       await db.collection('users').doc(uid).set({
         subscriptionTier: 'explorer',
         stripeSubscriptionId: null,
@@ -509,6 +531,10 @@ async function handleWebhook(
       await syncTutorPublication(uid, 'explorer');
 
       logInfo('stripe_webhook_canceled', 'stripe', { uid, durationMs: elapsed() });
+
+      if (planDirection(tierBeforeCancel, 'explorer') === 'cancel') {
+        await recordPlanChange(event.id, { direction: 'cancel', from: tierBeforeCancel, to: 'explorer' });
+      }
 
       const recipient = await recipientFor(uid);
       if (recipient) {

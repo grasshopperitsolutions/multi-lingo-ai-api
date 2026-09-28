@@ -59,5 +59,9 @@ export async function askPerplexity(
   } as any);
 
   const text = (completion as any).choices[0]?.message?.content ?? '';
-  return { text, provider: 'perplexity', model };
+  const usage = (completion as any).usage;
+  const tokens = usage
+    ? { input: usage.prompt_tokens ?? 0, output: usage.completion_tokens ?? 0, thinking: 0 }
+    : undefined;
+  return { text, provider: 'perplexity', model, tokens };
 }

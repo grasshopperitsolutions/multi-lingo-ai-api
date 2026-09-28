@@ -16,7 +16,7 @@ Avoid `coverage/`, `node_modules/`, generated output, and unrelated endpoints un
 A consolidated Vercel serverless API acting as a proxy in front of Firebase (Auth/Firestore/Storage), Stripe, and AI providers (OpenAI/Gemini/Perplexity) for the Multi-Lingo AI frontend. The frontend never talks to Firebase directly — `firestore.rules` denies all client reads/writes unconditionally, since every operation must go through this proxy using the Firebase Admin SDK (which bypasses those rules). This is the sole enforcement point for authorization.
 
 There are exactly 7 endpoints, each a separate Vercel serverless function (120s max duration, see `vercel.json`; the account is on Vercel Pro, so the ceiling is 800s if one ever needs it):
-- `api/auth.ts` — sign-in (Google; Apple/Facebook/X recognized but return 501), logout, account deletion
+- `api/auth.ts` — sign-in (Google; Apple/Facebook/X recognized but return 501), logout, account deletion, and the browser's usage counts for Admin › Pulse (`action: "pulse"`)
 - `api/firestore.ts` — generic CRUD proxy over all Firestore collections
 - `api/storage.ts` — signed-URL upload/download and file metadata via Cloud Storage
 - `api/ask-ai.ts` — proxies chat/completion requests to OpenAI, Gemini, or Perplexity
@@ -99,7 +99,7 @@ One endpoint, `api/email.ts`, carries three jobs, because a consolidated route i
 - `POST { action: 'broadcast' }` — admin only. Modes `user`/`tier`/`all`, capped at `MAX_BROADCAST_RECIPIENTS`, with a `confirm: 'ALL'` interlock on the all-users mode.
 - `GET` — the scheduled entry point, guarded by `CRON_SECRET` and scheduled in `vercel.json`. **Two cron entries hit it**, dispatched on `?job=`: the original daily 06:00 UTC run (no job param) and an hourly `?job=reminders`. Splitting by query param rather than by endpoint keeps the daily jobs' cadence and date stamps untouched while letting reminders run on their own schedule.
 - `GET ?job=reminders` — practice reminders, **push only**. Hourly because a reminder is scheduled against the user's own clock, so each user matches in exactly one of the 24 runs. `lib/reminders.ts` holds all the decision logic as pure functions — which template is due, in whose timezone, and whether it already went out — so the interesting half is testable without a scheduler or a clock. It returns at most one template per user per slot, ranked, because four notifications at once is how people turn notifications off. A user with no `timezone` is skipped rather than defaulted to UTC: the wrong hour is worse than nothing. This is also the **only loop in the repo that pages the whole `users` collection** (`__name__` cursor, 200 a page); the broadcast path still refuses above 500 rather than paging.
-- `GET` — the original daily run, guarded by `CRON_SECRET` and scheduled in `vercel.json`. Runs two once-daily jobs: it drains the mail queue first, then sends the unread-report digest. Both are idempotent on their own date stamp in `cronRuns`, and the digest sends nothing when the count is zero. The queue drains first because it is the one with a hard provider cap behind it and should not be skipped if the digest fails.
+- `GET` — the original daily run, guarded by `CRON_SECRET` and scheduled in `vercel.json`. Runs three once-daily jobs: it drains the mail queue first, then sends the unread-report digest, then writes the Pulse snapshot (see "Admin › Pulse" below), which never throws and replaces its own day on a rerun. The first two are idempotent on their own date stamp in `cronRuns`, and the digest sends nothing when the count is zero. The queue drains first because it is the one with a hard provider cap behind it and should not be skipped if the digest fails.
 
 Supporting modules:
 
@@ -200,6 +200,66 @@ Anything other than 200 there is a function that is not loading at all.
 `POST /api/auth` copies the provider's `displayName` and `photoURL` into `users/{uid}` on the **first** sign-in. After that they belong to the user, who changes them in Settings. On a later sign-in the provider's values only fill a field the profile is **missing** (empty or absent), so a profile that lost its name or picture gets it back and an edited one is left alone.
 
 It used to write both over the profile on every sign-in. A name or photo changed in Settings then lasted only until the next login. `test/api/auth.test.ts` covers both cases. The frontend reads the fields in the same order (profile first, provider second), and the response's `displayName`/`photoURL` follow it too.
+
+### Admin › Pulse — counters and a daily snapshot, counts only
+
+The frontend's Admin › Pulse tab reads three admin-only document sets this API
+writes (`lib/pulse.ts`, `lib/pulse-snapshot.ts`), all with explicit `admin`
+rows in `collection-policies.ts` — written by the Admin SDK with no
+`createdBy`, they would otherwise read as shared content to any signed-in
+caller:
+
+- **`appConfig/pulse/counters/{YYYY-MM-DD}`** — live increments through
+  `bump()`: `ai.{prompt}.{tier}.{calls,cached,refused,errors,inputTokens,
+  outputTokens,thinkingTokens}` and `models.{model}.*` from `ask-ai.ts`;
+  `limitHits.{tier}`; `liveSessions.{tier}` and `locked.ai_tutor.{tier}` from
+  `live-token.ts`; `accountDeletions.{self,admin}` from `DELETE /api/auth`;
+  `planChanges.{direction}` and `planMoves.{from}_to_{to}` from the Stripe
+  webhook; and what the browser reports through `POST /api/auth` `pulse`:
+  `activeUsers`, `pageOpens`, `locked`, `liveSeconds`.
+- **`appConfig/pulse/weeks/{YYYY-Www}`** — unique weekly actives by sign-up
+  week (`cohorts`), for the retention table.
+- **`appConfig/pulse/days/{YYYY-MM-DD}`** — the 06:00 cron's recount of the
+  day before: users per tier and subscription state, login recency from
+  `auth.listUsers` (`lastRefreshTime` — only the Admin SDK can read it), pool
+  sizes, personal-space use and word/content translations via collection-group
+  queries, and MRR from `stripe.subscriptions.list`. Written with `set`, not
+  merge, so a second run replaces the first.
+
+Rules that hold it together:
+
+- **A counter never fails the request that caused it.** `bump` catches and
+  logs; callers await it only so Vercel does not freeze the instance mid-write.
+  Each snapshot section fails alone into `errors`, and `writeDailySnapshot`
+  never throws, so a Stripe outage cannot cost the mail queue.
+- **Client-named keys must name a document.** `resolveKnownId` accepts an
+  `ask-ai` `providerParams.feature` only if it is a prompt id, and a page id
+  only if it is a feature id (cached ten minutes per instance); anything else
+  is `other`. Without that, one caller could grow a day's document towards
+  Firestore's 1 MiB limit and break every counter until midnight.
+  `providerParams.feature` is deleted before the provider sees the params, and
+  the provider's `tokens` are stripped from the response, whose `usage` key
+  already means the daily allowance.
+- **Actives are exact because of one marker.** `users/{uid}.pulseSeen =
+  { day, week }` is moved in a transaction the first time a user reports
+  `active` each day and week; it is a latest value, never a history, and is in
+  `ALWAYS_PROTECTED_USER_FIELDS` with `acquisition`, so neither can be written
+  through the generic proxy.
+- **Revenue is read from Stripe, never inferred.** MRR is each active or
+  past-due subscription's price normalised to a month, in minor units per
+  currency; trials are counted apart. `lib/stripe.ts` is **imported inside
+  the revenue section, not at module scope** — it builds its client on import
+  and throws without a key, and `pulse-snapshot.ts` is imported by
+  `api/email.ts`, so a module-scope import would put the contact form and the
+  mail queue in Stripe's blast radius (the ERR_REQUIRE_ESM lesson again).
+  `tierFromPriceId` moved to `lib/stripe-plans.ts` for the same reason: two
+  readers, and `lib/stripe.ts` is mocked wholesale in tests.
+- **Counts only.** No uid, name, email or content is written to any of these
+  documents; the frontend's privacy policy §3.4 says so.
+
+The test mock (`test/helpers/mockFirebaseAdmin.ts`) now deep-merges nested maps
+on `set(..., { merge: true })` as Firestore does, resolves `increment` at any
+depth, and has `collectionGroup` and `auth.listUsers`.
 
 ## Companion frontend repo
 

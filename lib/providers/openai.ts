@@ -30,5 +30,9 @@ export async function askOpenAI(
   });
 
   const text = completion.choices[0]?.message?.content ?? '';
-  return { text, provider: 'openai', model };
+  const usage = completion.usage;
+  const tokens = usage
+    ? { input: usage.prompt_tokens ?? 0, output: usage.completion_tokens ?? 0, thinking: 0 }
+    : undefined;
+  return { text, provider: 'openai', model, tokens };
 }

@@ -33,6 +33,7 @@ import {
   type ReminderTemplate,
 } from '../lib/reminders';
 import { enqueueEmails, drainQueue, pendingCount, DAILY_SEND_CAP } from '../lib/mail-queue';
+import { writeDailySnapshot } from '../lib/pulse-snapshot';
 import type { VercelRequest, VercelResponse } from '../lib/types';
 
 const VALID_CONTACT_SUBJECTS = ['general', 'support', 'feedback', 'business', 'bug'];
@@ -585,6 +586,9 @@ async function handleCron(req: VercelRequest, res: VercelResponse, elapsed: () =
 
   const queue = await drainQueue();
   const digest = await handleReportDigest(elapsed);
+  // Last, and never throws: the Pulse snapshot is a recount of the day that
+  // just ended, and a failure in it must not cost the mail or the digest.
+  const pulse = await writeDailySnapshot();
 
   logInfo('cron_complete', 'email', {
     queueSent: queue.sent,
@@ -593,7 +597,7 @@ async function handleCron(req: VercelRequest, res: VercelResponse, elapsed: () =
     durationMs: elapsed(),
   });
 
-  return successResponse(res, { queue, digest });
+  return successResponse(res, { queue, digest, pulse });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

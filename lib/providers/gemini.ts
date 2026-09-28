@@ -168,7 +168,7 @@ export async function askGemini(
     // response ('MAX_TOKENS') from a complete one. Without it, a reply cut off
     // mid-JSON is indistinguishable from a malformed one, and the caller can't
     // know whether raising maxOutputTokens would help.
-    return { text, provider: 'gemini', model, finishReason };
+    return { text, provider: 'gemini', model, finishReason, tokens: tokensFrom(usage) };
   } catch (err: any) {
     throw _mapGeminiError(err, model);
   }
@@ -230,6 +230,7 @@ async function _askGeminiTts(
       text: '',
       provider: 'gemini',
       model,
+      tokens: tokensFrom(response.usageMetadata),
       audioData: inlineData.data,
       mimeType: inlineData.mimeType ?? 'audio/wav',
     };
@@ -271,4 +272,14 @@ function _mapGeminiError(err: any, model: string): Error {
     new Error('Gemini request failed. Please try again.'),
     { status: 500 }
   );
+}
+
+/** Gemini's usageMetadata as the counters record it; undefined when absent. */
+function tokensFrom(usage: any): AskAIResponse['tokens'] {
+  if (!usage) return undefined;
+  return {
+    input: usage.promptTokenCount ?? 0,
+    output: usage.candidatesTokenCount ?? 0,
+    thinking: usage.thoughtsTokenCount ?? 0,
+  };
 }

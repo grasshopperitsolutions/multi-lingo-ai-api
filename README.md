@@ -20,7 +20,7 @@ POST /api/auth
   "idToken": "id_token_from_provider"
 }
 ```
-Verifies the Firebase ID token, creates the user's `users/{uid}` Firestore doc on first sign-in, and returns a Firebase custom token.
+Verifies the Firebase ID token, creates the user's `users/{uid}` Firestore doc on first sign-in, and returns a Firebase custom token. An optional `acquisition` object (`referrerHost`, `utmSource`, `utmMedium`, `utmCampaign`, `landingPath`) is cleaned and stored on the new profile as `acquisition` — on the sign-in that creates the account only.
 
 **Social Login (Apple, Facebook, X)** — recognized but not yet available; returns `501`.
 ```json
@@ -29,6 +29,22 @@ POST /api/auth
   "action": "apple" // or "facebook", "twitter"
 }
 ```
+
+**Usage counts for Admin › Pulse** — signed-in, non-anonymous callers only.
+```json
+POST /api/auth
+Authorization: Bearer <token>
+{
+  "action": "pulse",
+  "events": [
+    { "type": "active" },
+    { "type": "open", "feature": "story_generator" },
+    { "type": "locked", "feature": "ai_tutor" },
+    { "type": "liveSeconds", "seconds": 300 }
+  ]
+}
+```
+1–20 events. Adds to `appConfig/pulse/counters/{day}` (and, for `active`, `appConfig/pulse/weeks/{week}`); a feature id that is not a document in `appConfig/config/features` counts as `other`. Returns `{ counted }`.
 
 **Logout**
 ```json
@@ -184,7 +200,7 @@ Handles Stripe Checkout, Billing Portal sessions, and the Stripe webhook (routed
 
 `POST { action: 'broadcast' }` is admin-only and sends an announcement to a single user, a tier, or everyone (the all-users mode needs `confirm: "ALL"`). Recipients who have opted out of the `announcements` category are skipped, and delivery uses Resend's batch endpoint rather than one request per recipient.
 
-`GET` is the nightly unread-report digest invoked by Vercel Cron. It is not callable by the app: it requires `Authorization: Bearer $CRON_SECRET`, is idempotent per day, and sends nothing when there are no unread reports.
+`GET` is the nightly unread-report digest invoked by Vercel Cron, which also drains the mail queue and writes the Pulse snapshot for the day before (`appConfig/pulse/days/{day}`). It is not callable by the app: it requires `Authorization: Bearer $CRON_SECRET`, is idempotent per day, and sends nothing when there are no unread reports.
 
 Transactional mail (welcome, subscription activated/cancelled/ended, payment failed, account deleted) is sent inline from the endpoints that cause it, never through this one. It is exempt from the opt-out categories.
 
