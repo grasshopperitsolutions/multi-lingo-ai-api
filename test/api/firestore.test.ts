@@ -223,6 +223,59 @@ describe('GET /api/firestore — collection queries respect document ownership',
   });
 });
 
+describe('GET /api/firestore — select projects query results', () => {
+  beforeEach(() => {
+    __testUtils.seedDoc('ttsClips', 'c1', { audioData: 'AAAA'.repeat(1000), voice: 'Sulafat', bytes: 4000 });
+    __testUtils.seedDoc('files', 'f-alice', { userId: 'alice', fileName: 'mine.pdf', size: 1 });
+    __testUtils.seedDoc('files', 'f-bob', { userId: 'bob', fileName: 'secret.pdf', size: 2 });
+  });
+
+  const query = (token: string, collection: string, select?: unknown) =>
+    createMockReqRes({
+      method: 'GET',
+      headers: bearer(token),
+      query: { collection, filters: '[]', ...(select === undefined ? {} : { select }) },
+    });
+
+  it('returns only the selected fields, so counting clips does not download their audio', async () => {
+    const { req, res } = query(TOKEN_ADMIN, 'ttsClips', JSON.stringify(['voice', 'bytes']));
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.documents).toEqual([{ id: 'c1', voice: 'Sulafat', bytes: 4000 }]);
+  });
+
+  it('keeps applying ownership when the caller leaves the owner fields out of select', async () => {
+    const { req, res } = query(TOKEN_ALICE, 'files', JSON.stringify(['size']));
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    const ids = res.body.data.documents.map((d: { id: string }) => d.id);
+    expect(ids).toEqual(['f-alice']);
+    expect(res.body.data.documents[0]).not.toHaveProperty('fileName');
+  });
+
+  it('still gates an admin-read collection before projecting it', async () => {
+    const { req, res } = query(TOKEN_ALICE, 'ttsClips', JSON.stringify(['voice']));
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it.each([
+    ['not JSON', 'voice'],
+    ['not an array', JSON.stringify({ voice: true })],
+    ['empty', '[]'],
+    ['a non-string field', JSON.stringify(['voice', 3])],
+    ['too many fields', JSON.stringify(Array.from({ length: 31 }, (_, i) => `f${i}`))],
+  ])('rejects a select that is %s', async (_label, select) => {
+    const { req, res } = query(TOKEN_ADMIN, 'ttsClips', select);
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(400);
+  });
+});
+
 describe('tutors — public read, uid-locked and tier-gated writes', () => {
   // The default owner-or-admin policy lets any signed-in caller CREATE a
   // document at any id that does not exist yet, and become its owner. On a

@@ -90,6 +90,7 @@ Query parameters:
 - `order` (optional): Order direction - `asc` or `desc`
 - `limit` (optional): Number of documents to return (default 100, capped at 200 regardless of what's requested)
 - `startAfter` (optional): Document ID for pagination
+- `select` (optional): JSON array of up to 30 field names. Only those fields come back (plus `createdBy` and `userId`, always added because ownership filtering reads them). Used by Admin › Pulse to count collections such as `ttsClips` without downloading their audio.
 
 Browsing or filter-querying the whole `users` collection requires admin — this is the read path the admin Users panel uses to list every user.
 

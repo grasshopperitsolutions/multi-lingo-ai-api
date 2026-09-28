@@ -58,6 +58,41 @@ const ALLOWED_OPS = new Set([
   'array-contains', 'in', 'not-in', 'array-contains-any',
 ]);
 
+/**
+ * Fields a projected query always returns, whatever the caller asked for.
+ * Ownership is applied to query results after the fact, from these two
+ * fields — leave them out and an owned document reads as unowned, which
+ * `filterQueryResultsByOwnership` treats as shared content visible to all.
+ */
+const OWNERSHIP_FIELDS = ['createdBy', 'userId'];
+
+/** Upper bound on `select`, so a projection stays a projection. */
+const MAX_SELECT_FIELDS = 30;
+
+/**
+ * Parses the optional `select` query parameter — a JSON array of field
+ * paths — into the projection to apply, or `null` for whole documents.
+ * Throws a message suitable for a 400 on anything malformed.
+ */
+function parseSelect(raw: unknown): string[] | null {
+  if (raw === undefined || raw === '') return null;
+  let fields: unknown;
+  try {
+    fields = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    throw new Error('select must be a JSON array of field names');
+  }
+  if (
+    !Array.isArray(fields) ||
+    fields.length === 0 ||
+    fields.length > MAX_SELECT_FIELDS ||
+    !fields.every((f) => typeof f === 'string' && f.trim() !== '')
+  ) {
+    throw new Error(`select must be a JSON array of 1 to ${MAX_SELECT_FIELDS} field names`);
+  }
+  return [...new Set([...fields.map((f: string) => f.trim()), ...OWNERSHIP_FIELDS])];
+}
+
 /** Default query limit when the caller does not specify one. */
 const DEFAULT_QUERY_LIMIT = 100;
 
@@ -229,6 +264,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             : DEFAULT_QUERY_LIMIT;
           const startAfter = req.query.startAfter;
 
+          // Optional projection. A pool's top-level documents are small, but
+          // some admin-read collections are not — ttsClips holds the audio
+          // itself — and counting them should not mean downloading them.
+          let select: string[] | null;
+          try {
+            select = parseSelect(req.query.select);
+          } catch (e: any) {
+            return errorResponse(res, e.message, 400);
+          }
+
           let firestoreQuery: FirebaseFirestore.Query = resolveCollection(
             collection as string
           );
@@ -258,6 +303,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           if (startAfter && orderBy) {
             firestoreQuery = firestoreQuery.startAfter(startAfter);
+          }
+
+          if (select) {
+            firestoreQuery = firestoreQuery.select(...select);
           }
 
           const snapshot = await firestoreQuery.get();

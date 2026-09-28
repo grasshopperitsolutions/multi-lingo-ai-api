@@ -58,19 +58,23 @@ function applyOp(actual: any, op: string, expected: any): boolean {
   }
 }
 
-function makeQuery(path: string, filters: Array<{ field: string; op: string; value: any }> = [], orderField?: string, orderDir?: string, limitN?: number): any {
+function makeQuery(path: string, filters: Array<{ field: string; op: string; value: any }> = [], orderField?: string, orderDir?: string, limitN?: number, selectFields?: string[]): any {
   const query = {
     where(field: string, op: string, value: any) {
-      return makeQuery(path, [...filters, { field, op, value }], orderField, orderDir, limitN);
+      return makeQuery(path, [...filters, { field, op, value }], orderField, orderDir, limitN, selectFields);
     },
     orderBy(field: string, dir: string = 'asc') {
-      return makeQuery(path, filters, field, dir, limitN);
+      return makeQuery(path, filters, field, dir, limitN, selectFields);
     },
     limit(n: number) {
-      return makeQuery(path, filters, orderField, orderDir, n);
+      return makeQuery(path, filters, orderField, orderDir, n, selectFields);
     },
     startAfter(_val: any) {
-      return makeQuery(path, filters, orderField, orderDir, limitN);
+      return makeQuery(path, filters, orderField, orderDir, limitN, selectFields);
+    },
+    /** Field projection, as Query.select: documents carry only these fields. */
+    select(...fields: string[]) {
+      return makeQuery(path, filters, orderField, orderDir, limitN, fields);
     },
     /** Aggregate query — lib/mail-queue.ts counts pending rows with this. */
     count() {
@@ -107,7 +111,13 @@ function makeQuery(path: string, filters: Array<{ field: string; op: string; val
         // Real QuerySnapshot exposes size; production code counts with it
         // (the broadcast recipient cap and the report digest both do).
         size: docs.length,
-        docs: docs.map((d) => ({ id: d.id, data: () => ({ ...d.data }), ref: makeDocRef(path, d.id) })),
+        docs: docs.map((d) => ({
+          id: d.id,
+          data: () => (selectFields
+            ? Object.fromEntries(selectFields.filter((f) => f in (d.data as any)).map((f) => [f, (d.data as any)[f]]))
+            : { ...d.data }),
+          ref: makeDocRef(path, d.id),
+        })),
       };
     },
   };
@@ -187,6 +197,7 @@ function makeCollectionRef(path: string): any {
     where: q.where,
     orderBy: q.orderBy,
     limit: q.limit,
+    select: q.select,
     count: q.count,
     get: q.get,
   };
