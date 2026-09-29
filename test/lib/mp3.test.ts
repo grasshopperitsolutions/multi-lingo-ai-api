@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { compressPcmToMp3, isRawPcm, MP3_MIME } from '../../lib/mp3';
+import { compressPcmToMp3, detectAudioKind, isRawPcm, parseWav, MP3_MIME } from '../../lib/mp3';
 
 /**
  * The compression that makes the speech cache possible at all.
@@ -98,6 +98,252 @@ describe('compressPcmToMp3', () => {
     expect(at24.compressed).toBe(true);
     expect(at16.compressed).toBe(true);
     expect(at16.audioData.length).toBeGreaterThan(at24.audioData.length * 1.3);
+  });
+});
+
+/**
+ * Gemini 3.8 returns a WAV, not raw PCM. Its MIME type (`audio/wav`) matched
+ * nothing the old check knew, so every clip skipped compression: responses
+ * eight times larger, and anything over ~14 seconds too big to cache.
+ */
+
+interface WavOptions {
+  rate?: number;
+  channels?: number;
+  bits?: number;
+  format?: number;
+  seconds?: number;
+  /** Extra chunks written between `fmt ` and `data`. */
+  before?: Array<{ id: string; size: number }>;
+  /** What the `data` header claims; defaults to the true size. */
+  declaredDataSize?: number;
+  /** Cut the file to this many bytes, as a truncated download would be. */
+  truncateTo?: number;
+  /** Put `data` ahead of `fmt `. */
+  dataFirst?: boolean;
+}
+
+/** A WAV built chunk by chunk, so each test can break exactly one thing. */
+function wav(options: WavOptions = {}): Buffer {
+  const { rate = RATE, channels = 1, bits = 16, format = 1, seconds = 1 } = options;
+  const dataBytes = Math.round(rate * seconds) * channels * (bits / 8);
+
+  const fmt = Buffer.alloc(24);
+  fmt.write('fmt ', 0, 'latin1');
+  fmt.writeUInt32LE(16, 4);
+  fmt.writeUInt16LE(format, 8);
+  fmt.writeUInt16LE(channels, 10);
+  fmt.writeUInt32LE(rate, 12);
+  fmt.writeUInt32LE((rate * channels * bits) / 8, 16);
+  fmt.writeUInt16LE((channels * bits) / 8, 20);
+  fmt.writeUInt16LE(bits, 22);
+
+  const extras = (options.before ?? []).map(({ id, size }) => {
+    const chunk = Buffer.alloc(8 + size + (size % 2));
+    chunk.write(id, 0, 'latin1');
+    chunk.writeUInt32LE(size, 4);
+    chunk.fill(0x41, 8, 8 + size);
+    return chunk;
+  });
+
+  const data = Buffer.alloc(8 + dataBytes);
+  data.write('data', 0, 'latin1');
+  data.writeUInt32LE(options.declaredDataSize ?? dataBytes, 4);
+  // A tone, so the encoder has something to encode; 8-bit is unsigned and
+  // 16-bit signed, but the content only has to be non-silent.
+  for (let i = 0; i < dataBytes / 2; i += 1) {
+    data.writeInt16LE(Math.round(9000 * Math.sin((2 * Math.PI * 220 * i) / rate)), 8 + i * 2);
+  }
+
+  const body = options.dataFirst
+    ? [data, fmt, ...extras]
+    : [fmt, ...extras, data];
+  const payload = Buffer.concat([Buffer.from('WAVE', 'latin1'), ...body]);
+  const header = Buffer.alloc(8);
+  header.write('RIFF', 0, 'latin1');
+  header.writeUInt32LE(payload.length, 4);
+
+  const file = Buffer.concat([header, payload]);
+  return options.truncateTo ? file.subarray(0, options.truncateTo) : file;
+}
+
+const WAV_MIME = 'audio/wav';
+const b64 = (buffer: Buffer) => buffer.toString('base64');
+
+describe('detectAudioKind', () => {
+  it('tells raw PCM, WAV and everything else apart by label', () => {
+    expect(detectAudioKind(PCM_MIME)).toBe('pcm');
+    expect(detectAudioKind('audio/wav')).toBe('wav');
+    expect(detectAudioKind('audio/x-wav')).toBe('wav');
+    expect(detectAudioKind('audio/wave')).toBe('wav');
+    expect(detectAudioKind('audio/mpeg')).toBe('other');
+    expect(detectAudioKind(undefined)).toBe('other');
+  });
+
+  it('does not take a WAV labelled with codec=pcm for headerless PCM', () => {
+    // Wrapping a second header around it would play as a click in the browser.
+    expect(detectAudioKind('audio/wav;codec=pcm')).toBe('wav');
+    expect(isRawPcm('audio/wav;codec=pcm')).toBe(false);
+  });
+
+  it('recognises a WAV by its bytes when the label says nothing useful', () => {
+    expect(detectAudioKind('application/octet-stream', b64(wav()))).toBe('wav');
+    expect(detectAudioKind(undefined, b64(wav()))).toBe('wav');
+  });
+
+  it('does not mistake other bytes for a WAV', () => {
+    expect(detectAudioKind('application/octet-stream', b64(Buffer.from('ID3 not a riff file')))).toBe('other');
+  });
+});
+
+describe('parseWav', () => {
+  it('reads a minimal 44-byte header', () => {
+    const parsed = parseWav(wav({ seconds: 0.5 }));
+    expect(parsed).toMatchObject({ sampleRate: 24000, channels: 1 });
+    expect(parsed?.samples.length).toBe(24000);
+  });
+
+  it('finds data past a LIST chunk instead of assuming 44 bytes', () => {
+    const plain = parseWav(wav({ seconds: 0.5 }));
+    const withList = parseWav(wav({ seconds: 0.5, before: [{ id: 'LIST', size: 26 }] }));
+    expect(withList?.samples.length).toBe(plain?.samples.length);
+    // The samples are the tone, not the LIST payload (filled with 0x41).
+    expect(withList?.samples.equals(plain!.samples)).toBe(true);
+  });
+
+  it('steps over the padding byte after an odd-sized chunk', () => {
+    const plain = parseWav(wav({ seconds: 0.5 }));
+    const odd = parseWav(wav({ seconds: 0.5, before: [{ id: 'junk', size: 7 }] }));
+    expect(odd?.samples.equals(plain!.samples)).toBe(true);
+  });
+
+  it.each([0, 0xffffffff])('reads to the end of the buffer when the data size is %s', (declaredDataSize) => {
+    const parsed = parseWav(wav({ seconds: 0.5, declaredDataSize }));
+    expect(parsed?.samples.length).toBe(24000);
+  });
+
+  it('clamps a data size larger than the file to what is actually there', () => {
+    const full = wav({ seconds: 1 });
+    const parsed = parseWav(full.subarray(0, 44 + 10000));
+    expect(parsed?.samples.length).toBe(10000);
+  });
+
+  it('drops a trailing half sample', () => {
+    const parsed = parseWav(wav({ seconds: 0.5, declaredDataSize: 0 }).subarray(0, 44 + 1001));
+    expect(parsed?.samples.length).toBe(1000);
+  });
+
+  it.each([
+    ['a non-PCM format', wav({ format: 3, bits: 32 })],
+    ['8-bit samples', wav({ bits: 8 })],
+    ['24-bit samples', wav({ bits: 24 })],
+    ['more than two channels', wav({ channels: 6 })],
+    ['a sample rate out of range', wav({ rate: 96000, seconds: 0.1 })],
+    ['data ahead of fmt', wav({ dataFirst: true, seconds: 0.1 })],
+    ['a header cut off inside fmt', wav().subarray(0, 30)],
+    ['no data chunk at all', wav().subarray(0, 36)],
+    ['a data chunk with no samples', wav({ seconds: 0 })],
+    ['not a RIFF file', Buffer.from('OggS this is not a wav file at all')],
+  ])('refuses %s', (_label, buffer) => {
+    expect(parseWav(buffer)).toBeNull();
+  });
+});
+
+describe('compressPcmToMp3 — WAV', () => {
+  it('compresses a WAV to an MP3 several times smaller', async () => {
+    const source = b64(wav({ seconds: 3 }));
+    const out = await compressPcmToMp3(source, WAV_MIME);
+
+    expect(out.compressed).toBe(true);
+    expect(out.mimeType).toBe(MP3_MIME);
+    expect(startsWithMp3Frame(out.audioData)).toBe(true);
+    expect(source.length / out.audioData.length).toBeGreaterThan(4);
+  });
+
+  it('keeps a twenty-second paragraph inside a Firestore document', async () => {
+    // Uncompressed this is ~1.3 MB of base64 — the reason WAV must compress.
+    const out = await compressPcmToMp3(b64(wav({ seconds: 20 })), WAV_MIME);
+
+    expect(out.compressed).toBe(true);
+    expect(out.audioData.length).toBeLessThan(900_000);
+  });
+
+  it('compresses a WAV whose data sits behind a LIST chunk', async () => {
+    const out = await compressPcmToMp3(b64(wav({ seconds: 1, before: [{ id: 'LIST', size: 26 }] })), WAV_MIME);
+    expect(out.compressed).toBe(true);
+  });
+
+  it.each([0, 0xffffffff])('compresses a WAV that declares a data size of %s', async (declaredDataSize) => {
+    const out = await compressPcmToMp3(b64(wav({ seconds: 1, declaredDataSize })), WAV_MIME);
+    expect(out.compressed).toBe(true);
+  });
+
+  it('compresses a truncated WAV as far as it goes', async () => {
+    const out = await compressPcmToMp3(b64(wav({ seconds: 2 }).subarray(0, 44 + 20000)), WAV_MIME);
+    expect(out.compressed).toBe(true);
+  });
+
+  it('compresses stereo, downmixed to mono', async () => {
+    const stereo = b64(wav({ seconds: 2, channels: 2 }));
+    const mono = b64(wav({ seconds: 2 }));
+    const outStereo = await compressPcmToMp3(stereo, WAV_MIME);
+    const outMono = await compressPcmToMp3(mono, WAV_MIME);
+
+    expect(outStereo.compressed).toBe(true);
+    // The same duration at the same bitrate: downmixing keeps it the same size
+    // rather than doubling the encoder's input.
+    expect(Math.abs(outStereo.audioData.length - outMono.audioData.length)).toBeLessThan(
+      outMono.audioData.length * 0.1,
+    );
+  });
+
+  it('takes the sample rate from the header, not the label', async () => {
+    // The same sample count, described as 24 kHz and as 16 kHz: the second is
+    // 1.5x longer in time, so at a fixed bitrate a bigger file is proof the
+    // header's rate was read.
+    const count = 48000;
+    const at24 = wav({ rate: 24000, seconds: count / 24000 });
+    const at16 = wav({ rate: 16000, seconds: count / 16000 });
+    const out24 = await compressPcmToMp3(b64(at24), WAV_MIME);
+    const out16 = await compressPcmToMp3(b64(at16), WAV_MIME);
+
+    expect(out24.compressed).toBe(true);
+    expect(out16.compressed).toBe(true);
+    expect(out16.audioData.length).toBeGreaterThan(out24.audioData.length * 1.3);
+  });
+
+  it('compresses a WAV under a label nobody predicted, by its bytes', async () => {
+    const out = await compressPcmToMp3(b64(wav()), 'application/octet-stream');
+    expect(out.compressed).toBe(true);
+  });
+
+  it('does not wrap a second header around a WAV labelled codec=pcm', async () => {
+    const out = await compressPcmToMp3(b64(wav({ seconds: 1 })), 'audio/wav;codec=pcm;rate=24000');
+
+    expect(out.compressed).toBe(true);
+    expect(startsWithMp3Frame(out.audioData)).toBe(true);
+  });
+
+  it.each([
+    ['a non-PCM format', wav({ format: 3, bits: 32 })],
+    ['8-bit samples', wav({ bits: 8 })],
+    ['a header cut off inside fmt', wav().subarray(0, 30)],
+    ['a data chunk with no samples', wav({ seconds: 0 })],
+    ['data ahead of fmt', wav({ dataFirst: true, seconds: 0.1 })],
+  ])('hands back the original untouched for %s', async (_label, buffer) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const source = b64(buffer);
+    const out = await compressPcmToMp3(source, WAV_MIME);
+
+    expect(out.compressed).toBe(false);
+    expect(out.audioData).toBe(source);
+    expect(out.mimeType).toBe(WAV_MIME);
+    vi.restoreAllMocks();
+  });
+
+  it('leaves raw PCM compressing as before', async () => {
+    const out = await compressPcmToMp3(pcmBase64(2), PCM_MIME);
+    expect(out.compressed).toBe(true);
   });
 });
 

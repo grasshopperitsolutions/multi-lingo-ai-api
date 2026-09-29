@@ -1,10 +1,11 @@
 /**
  * mp3.ts
  *
- * Compresses the raw PCM that Gemini TTS returns into MP3.
+ * Compresses the PCM that Gemini TTS returns into MP3.
  *
- * Gemini hands back signed 16-bit little-endian mono PCM at 24 kHz with no
- * container — 48 KB per second of speech, 64 KB once base64'd. That is fine
+ * Gemini 3.1 and earlier hand back signed 16-bit little-endian mono PCM at
+ * 24 kHz with no container; 3.8 returns the same samples inside a WAV. Either
+ * way it is 48 KB per second of speech, 64 KB once base64'd. That is fine
  * to play and hopeless to keep: a twenty-second story paragraph is 1.3 MB of
  * base64, which is past Firestore's 1 MiB document ceiling before any other
  * field is written. Compressed, the same paragraph is about 150 KB and the
@@ -31,7 +32,7 @@
  * do.
  */
 
-import { logWarn } from './logger';
+import { logInfo, logWarn } from './logger';
 
 /**
  * ## The encoder is loaded lazily, and that is not an optimisation
@@ -80,6 +81,9 @@ type Mp3EncoderCtor = new (
   kbps: number,
 ) => { encodeBuffer(left: Int16Array): Uint8Array; flush(): Uint8Array };
 
+/** Everything Gemini could hand us, as far as compression is concerned. */
+export type AudioKind = 'pcm' | 'wav' | 'other';
+
 /** `undefined` = not tried yet, `null` = tried and unavailable. */
 let encoderCtor: Mp3EncoderCtor | null | undefined;
 
@@ -127,9 +131,40 @@ const SAMPLES_PER_FRAME = 1152;
 
 export const MP3_MIME = 'audio/mpeg';
 
-/** True for the raw PCM shapes Gemini labels its TTS output with. */
+
+/**
+ * Which kind of audio this is.
+ *
+ * The MIME type decides when it can, and the bytes decide when it cannot: a
+ * WAV is recognised by `RIFF`…`WAVE` even under a label nobody predicted.
+ * `wav` is checked in the label first so that `codec=pcm` on a WAV — a shape
+ * that would match a bare `pcm` test — does not get a second header wrapped
+ * around it.
+ */
+export function detectAudioKind(mimeType: string | undefined, audioBase64?: string): AudioKind {
+  const label = mimeType ?? '';
+  if (/wav/i.test(label)) return 'wav';
+  if (/L16|pcm/i.test(label)) return 'pcm';
+
+  // Twelve bytes are sixteen base64 characters; no need to decode the clip.
+  if (audioBase64) {
+    const head = Buffer.from(audioBase64.slice(0, 16), 'base64');
+    if (isRiffWave(head)) return 'wav';
+  }
+  return 'other';
+}
+
+/** True for the headerless PCM shapes older Gemini TTS models label their output with. */
 export function isRawPcm(mimeType: string | undefined): boolean {
-  return /L16|pcm/i.test(mimeType ?? '');
+  return detectAudioKind(mimeType) === 'pcm';
+}
+
+function isRiffWave(bytes: Buffer): boolean {
+  return (
+    bytes.length >= 12 &&
+    bytes.toString('latin1', 0, 4) === 'RIFF' &&
+    bytes.toString('latin1', 8, 12) === 'WAVE'
+  );
 }
 
 /** Pull `rate=24000` out of `audio/L16;codec=pcm;rate=24000`. */
@@ -139,14 +174,90 @@ function parseSampleRate(mimeType: string | undefined): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SAMPLE_RATE;
 }
 
+interface PcmAudio {
+  sampleRate: number;
+  channels: 1 | 2;
+  /** 16-bit little-endian samples, interleaved when stereo. */
+  samples: Buffer;
+}
+
 /**
- * Compress base64 PCM to base64 MP3.
+ * Read the PCM out of a WAV, or null when it is anything we should not touch.
  *
- * Returns the input untouched when it is not raw PCM (another provider, or a
- * future model that returns a container already) and when encoding fails —
- * a compression problem must never cost the listener their audio, since the
- * bytes in hand are perfectly playable as they are. The caller can tell the
- * two apart by the returned mimeType.
+ * The chunks are walked, never assumed: a header is 44 bytes only when nothing
+ * sits between `fmt ` and `data`, and a `LIST` chunk often does. Only 16-bit
+ * integer PCM in one or two channels is accepted; anything else is the caller's
+ * to pass through unchanged, since a wrong guess here is an audible click.
+ */
+export function parseWav(bytes: Buffer): PcmAudio | null {
+  if (!isRiffWave(bytes)) return null;
+
+  let format = 0;
+  let channels = 0;
+  let sampleRate = 0;
+  let bits = 0;
+  let sawFmt = false;
+
+  let pos = 12;
+  while (pos + 8 <= bytes.length) {
+    const id = bytes.toString('latin1', pos, pos + 4);
+    const declared = bytes.readUInt32LE(pos + 4);
+    const body = pos + 8;
+
+    if (id === 'fmt ') {
+      if (declared < 16 || body + 16 > bytes.length) return null;
+      format = bytes.readUInt16LE(body);
+      channels = bytes.readUInt16LE(body + 2);
+      sampleRate = bytes.readUInt32LE(body + 4);
+      bits = bytes.readUInt16LE(body + 14);
+      sawFmt = true;
+    } else if (id === 'data') {
+      if (!sawFmt) return null;
+      if (format !== 1 || bits !== 16 || (channels !== 1 && channels !== 2)) return null;
+      if (sampleRate < 8000 || sampleRate > 48000) return null;
+
+      // A streamed WAV cannot know its length, so it says 0 or 0xFFFFFFFF.
+      const available = bytes.length - body;
+      const size = declared === 0 || declared === 0xffffffff ? available : Math.min(declared, available);
+      const usable = size - (size % (channels * 2));
+      if (usable <= 0) return null;
+
+      return {
+        sampleRate,
+        channels: channels as 1 | 2,
+        samples: bytes.subarray(body, body + usable),
+      };
+    }
+
+    // Chunks are word-aligned: an odd size is followed by a padding byte.
+    pos = body + declared + (declared % 2);
+  }
+
+  return null;
+}
+
+/** One mono Int16Array from interleaved 16-bit samples, averaging stereo. */
+function toMono(pcm: PcmAudio): Int16Array {
+  const frames = Math.floor(pcm.samples.length / (pcm.channels * 2));
+  const out = new Int16Array(frames);
+  for (let i = 0; i < frames; i += 1) {
+    out[i] =
+      pcm.channels === 1
+        ? pcm.samples.readInt16LE(i * 2)
+        : Math.round((pcm.samples.readInt16LE(i * 4) + pcm.samples.readInt16LE(i * 4 + 2)) / 2);
+  }
+  return out;
+}
+
+/**
+ * Compress base64 PCM or WAV to base64 MP3.
+ *
+ * Returns the input untouched when it is neither (another provider, or a
+ * future model that returns a container already), when a WAV is not the plain
+ * 16-bit PCM we know how to read, and when encoding fails — a compression
+ * problem must never cost the listener their audio, since the bytes in hand
+ * are perfectly playable as they are. The caller can tell the two apart by the
+ * returned mimeType.
  */
 export async function compressPcmToMp3(
   audioBase64: string,
@@ -154,7 +265,8 @@ export async function compressPcmToMp3(
 ): Promise<{ audioData: string; mimeType: string; compressed: boolean }> {
   const original = { audioData: audioBase64, mimeType: mimeType ?? 'audio/wav', compressed: false };
 
-  if (!isRawPcm(mimeType)) return original;
+  const kind = detectAudioKind(mimeType, audioBase64);
+  if (kind === 'other') return original;
 
   // Asked for before any work is done, and the one call that can fail for a
   // reason unrelated to this audio. See the note at the top of this file.
@@ -162,18 +274,31 @@ export async function compressPcmToMp3(
   if (!Mp3Encoder) return original;
 
   try {
-    const sampleRate = parseSampleRate(mimeType);
     const bytes = Buffer.from(audioBase64, 'base64');
 
-    // A trailing odd byte cannot be half a sample; drop it rather than read
-    // past the end of the buffer.
-    const sampleCount = Math.floor(bytes.length / 2);
-    if (sampleCount === 0) return original;
+    let samples: Int16Array;
+    let sampleRate: number;
 
-    const samples = new Int16Array(sampleCount);
-    for (let i = 0; i < sampleCount; i += 1) {
-      samples[i] = bytes.readInt16LE(i * 2);
+    if (kind === 'wav') {
+      const wav = parseWav(bytes);
+      if (!wav) {
+        logWarn('tts_wav_unreadable', 'ask-ai', { mimeType: mimeType ?? 'unknown', bytes: bytes.length });
+        return original;
+      }
+      samples = toMono(wav);
+      sampleRate = wav.sampleRate;
+    } else {
+      sampleRate = parseSampleRate(mimeType);
+      // A trailing odd byte cannot be half a sample; drop it rather than read
+      // past the end of the buffer.
+      const sampleCount = Math.floor(bytes.length / 2);
+      samples = new Int16Array(sampleCount);
+      for (let i = 0; i < sampleCount; i += 1) {
+        samples[i] = bytes.readInt16LE(i * 2);
+      }
     }
+
+    if (samples.length === 0) return original;
 
     const encoder = new Mp3Encoder(1, sampleRate, BITRATE_KBPS);
     const chunks: Buffer[] = [];
@@ -188,6 +313,13 @@ export async function compressPcmToMp3(
 
     const mp3 = Buffer.concat(chunks);
     if (mp3.length === 0) return original;
+
+    logInfo('tts_mp3_compressed', 'ask-ai', {
+      source: kind,
+      sampleRate,
+      bytesBefore: bytes.length,
+      bytesAfter: mp3.length,
+    });
 
     return { audioData: mp3.toString('base64'), mimeType: MP3_MIME, compressed: true };
   } catch (err: any) {

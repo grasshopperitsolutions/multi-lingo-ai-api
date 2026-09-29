@@ -65,7 +65,7 @@ const post = async (body: unknown) => {
 
 /** Put a clip in the cache under the key the handler will compute. */
 const seedClip = (audioData = 'cached-mp3-bytes', overrides: Record<string, unknown> = {}) => {
-  const key = ttsCacheKey({ model: MODEL, voice: VOICE, prompt: PROMPT, ...overrides } as any);
+  const key = ttsCacheKey({ model: MODEL, voice: VOICE, style: '', prompt: PROMPT, ...overrides } as any);
   __testUtils.seedDoc(TTS_CACHE_COLLECTION, key, { audioData, mimeType: 'audio/mpeg' });
   return key;
 };
@@ -142,7 +142,7 @@ describe('POST /api/ask-ai — filling the cache', () => {
     expect(askGemini).toHaveBeenCalledTimes(1);
     expect(res.body?.data?.mimeType).toBe('audio/mpeg');
 
-    const key = ttsCacheKey({ model: MODEL, voice: VOICE, prompt: PROMPT });
+    const key = ttsCacheKey({ model: MODEL, voice: VOICE, style: '', prompt: PROMPT });
     const stored = __testUtils.getDoc(TTS_CACHE_COLLECTION, key);
     expect(stored?.audioData).toBe(res.body?.data?.audioData);
     expect(stored?.mimeType).toBe('audio/mpeg');
@@ -172,7 +172,7 @@ describe('POST /api/ask-ai — what stays out of the cache', () => {
 
     expect(askGemini).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(200);
-    const key = ttsCacheKey({ model: MODEL, voice: VOICE, prompt: PROMPT });
+    const key = ttsCacheKey({ model: MODEL, voice: VOICE, style: '', prompt: PROMPT });
     expect(__testUtils.getDoc(TTS_CACHE_COLLECTION, key)).toBeUndefined();
   });
 
@@ -208,18 +208,48 @@ describe('POST /api/ask-ai — what the key covers', () => {
     expect(askGemini).toHaveBeenCalledTimes(1);
   });
 
-  it('treats an edited prompt template as a different recording', async () => {
-    // The pace, the language and the region are all interpolated into the
-    // rendered prompt, so hashing it means an admin rewording
-    // `tts-build-prompt` invalidates every clip without anyone having to
-    // remember a version field.
+  it('treats a different transcript as a different recording', async () => {
     __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
     seedClip();
 
     const { prompt: _drop, ...rest } = ttsBody();
-    await post({ prompt: `${PROMPT}, slowly`, ...rest });
+    await post({ prompt: `${PROMPT} outra vez`, ...rest });
 
     expect(askGemini).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a different style as a different recording', async () => {
+    // The language, the region and the pace are interpolated into the style,
+    // so hashing it means the same words read in pt-PT and pt-BR, or slowly
+    // and naturally, never share a clip — and an admin rewording
+    // `tts-build-prompt` invalidates every clip without anyone having to
+    // remember a version field.
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    seedClip('cached-natural', { style: 'European Portuguese, natural pace' });
+
+    const res = await post(ttsBody({ ttsStyle: 'European Portuguese, slow pace' }));
+
+    expect(askGemini).toHaveBeenCalledTimes(1);
+    expect(res.body?.data?.audioData).not.toBe('cached-natural');
+  });
+
+  it('serves a clip stored under the same style', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    seedClip('cached-natural', { style: 'European Portuguese, natural pace' });
+
+    const res = await post(ttsBody({ ttsStyle: 'European Portuguese, natural pace' }));
+
+    expect(askGemini).not.toHaveBeenCalled();
+    expect(res.body?.data?.audioData).toBe('cached-natural');
+  });
+
+  it('stores the style on the clip so it can be inspected', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+
+    await post(ttsBody({ ttsStyle: 'Brazilian Portuguese, warm' }));
+
+    const key = ttsCacheKey({ model: MODEL, voice: VOICE, style: 'Brazilian Portuguese, warm', prompt: PROMPT });
+    expect(__testUtils.getDoc(TTS_CACHE_COLLECTION, key)?.style).toBe('Brazilian Portuguese, warm');
   });
 
   it('gives an Explorer on a split model their own recording', async () => {
@@ -231,7 +261,39 @@ describe('POST /api/ask-ai — what the key covers', () => {
     await post(ttsBody({ explorerModel: 'gemini-3.1-flash-tts-cheap' }));
 
     expect(askGemini).toHaveBeenCalledTimes(1);
-    const key = ttsCacheKey({ model: 'gemini-3.1-flash-tts-cheap', voice: VOICE, prompt: PROMPT });
+    const key = ttsCacheKey({ model: 'gemini-3.1-flash-tts-cheap', voice: VOICE, style: '', prompt: PROMPT });
     expect(__testUtils.getDoc(TTS_CACHE_COLLECTION, key)).toBeDefined();
+  });
+});
+
+describe('POST /api/ask-ai — validating the style', () => {
+  beforeEach(() => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+  });
+
+  it('passes the style through to the provider', async () => {
+    await post(ttsBody({ ttsStyle: 'calm' }));
+
+    expect(vi.mocked(askGemini).mock.calls[0][1]).toMatchObject({ ttsStyle: 'calm' });
+  });
+
+  it('rejects a style that is not a string', async () => {
+    const res = await post(ttsBody({ ttsStyle: { text: 'calm' } }));
+
+    expect(res.statusCode).toBe(400);
+    expect(askGemini).not.toHaveBeenCalled();
+  });
+
+  it('rejects a style over the length cap', async () => {
+    const res = await post(ttsBody({ ttsStyle: 'x'.repeat(1001) }));
+
+    expect(res.statusCode).toBe(400);
+    expect(askGemini).not.toHaveBeenCalled();
+  });
+
+  it('accepts a style exactly at the cap', async () => {
+    const res = await post(ttsBody({ ttsStyle: 'x'.repeat(1000) }));
+
+    expect(res.statusCode).toBe(200);
   });
 });

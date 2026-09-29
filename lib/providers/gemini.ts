@@ -4,9 +4,10 @@ import { logInfo, logWarn } from '../logger';
 
 const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
 
-// Default TTS model — gemini-3.1-flash-tts-preview is the current Gemini 3.1 TTS preview.
+// Default TTS model. The design is 3.8 only: the transcript and the style go
+// separately (see _askGeminiTts), which older TTS models do not understand.
 // gemini-3.5-flash-preview-tts does NOT exist and should never be used.
-const DEFAULT_TTS_MODEL = 'gemini-3.1-flash-tts-preview';
+const DEFAULT_TTS_MODEL = 'gemini-3.8-flash-tts';
 const DEFAULT_TTS_VOICE = 'Sulafat';
 
 /**
@@ -30,9 +31,11 @@ const DEFAULT_TTS_VOICE = 'Sulafat';
  *
  * TTS mode (params.tts === true):
  *  - Uses responseModalities: ['AUDIO'] with speechConfig.
- *  - Default model: gemini-3.1-flash-tts-preview.
+ *  - Default model: gemini-3.8-flash-tts, which reads the prompt as a verbatim
+ *    transcript; directions go in params.ttsStyle (speech_metadata.style).
  *  - Default voice: Sulafat.
- *  - Returns audioData (Base64) and mimeType instead of text.
+ *  - Returns audioData (Base64) and mimeType instead of text. 3.8 returns a
+ *    WAV; older models returned raw PCM. lib/mp3.ts handles both.
  *
  * Conversation history: 'system' role messages from ChatMessage[] are
  * forwarded as systemInstruction. 'user'/'assistant' ('model') turns are
@@ -193,23 +196,47 @@ async function _askGeminiTts(
     );
   }
 
+  // Gemini 3.8 TTS speaks the text part verbatim, so how to read it travels
+  // beside it as `speech_metadata.style` on the same part. Accent and region
+  // have to go there too: there is no region setting, and languageCode is
+  // ISO 639-1 only (`pt`, never `pt-PT`).
+  const style = params.ttsStyle?.trim();
+  const part = style ? { text, speechMetadata: { style } } : { text };
+
   try {
-    const response = await client.models.generateContent({
-      model,
-      contents: [{ role: 'user', parts: [{ text }] }],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: voice },
-          },
-        },
-      } as any,
-    });
+    // Google's 3.8 examples use `voiceConfig: { voice }`; older models took
+    // `prebuiltVoiceConfig.voiceName`, which the SDK types still declare. Which
+    // one 3.8 accepts is confirmed against the deployed API, so try the
+    // established shape first and fall back once if the API refuses it.
+    const generate = (voiceConfig: Record<string, unknown>) =>
+      client.models.generateContent({
+        model,
+        contents: [{ role: 'user', parts: [part] }],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig },
+        } as any,
+      });
+
+    let voiceShape = 'prebuilt';
+    let response;
+    try {
+      response = await generate({ prebuiltVoiceConfig: { voiceName: voice } });
+    } catch (firstErr: any) {
+      const firstStatus = firstErr?.status ?? firstErr?.code ?? firstErr?.response?.status;
+      if (firstStatus !== 400) throw firstErr;
+      logWarn('gemini_tts_voice_shape_refused', 'ask-ai', {
+        model,
+        voiceShape,
+        errorMessage: firstErr?.message ?? 'unknown',
+      });
+      voiceShape = 'voice';
+      response = await generate({ voice });
+    }
 
     const candidate = response.candidates?.[0];
-    const part = candidate?.content?.parts?.[0];
-    const inlineData = (part as any)?.inlineData;
+    const audioPart = candidate?.content?.parts?.[0];
+    const inlineData = (audioPart as any)?.inlineData;
 
     if (!inlineData?.data) {
       logWarn('gemini_tts_no_audio', 'ask-ai', { model, voice });
@@ -222,6 +249,8 @@ async function _askGeminiTts(
     logInfo('gemini_tts_generated', 'ask-ai', {
       model,
       voice,
+      voiceShape,
+      styleSent: !!style,
       mimeType: inlineData.mimeType ?? 'unknown',
       audioBytes: Math.round((inlineData.data.length * 3) / 4),
     });

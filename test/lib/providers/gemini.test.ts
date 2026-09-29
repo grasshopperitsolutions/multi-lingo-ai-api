@@ -107,6 +107,76 @@ describe('askGemini — TTS mode', () => {
     expect(result.mimeType).toBe('audio/wav');
   });
 
+  const audioResponse = () => ({
+    candidates: [{ content: { parts: [{ inlineData: { data: 'QUJD', mimeType: 'audio/wav' } }] } }],
+  });
+
+  it('defaults to the 3.8 TTS model', async () => {
+    generateContentMock.mockResolvedValueOnce(audioResponse());
+    const result = await askGemini('speak this', { provider: 'gemini', tts: true });
+    expect(generateContentMock.mock.calls[0][0].model).toBe('gemini-3.8-flash-tts');
+    expect(result.model).toBe('gemini-3.8-flash-tts');
+  });
+
+  it('sends the style as speechMetadata on the same part as the transcript', async () => {
+    generateContentMock.mockResolvedValueOnce(audioResponse());
+    await askGemini('casa', { provider: 'gemini', tts: true, ttsStyle: 'European Portuguese, slowly' });
+
+    const call = generateContentMock.mock.calls[0][0];
+    // The transcript stays exactly the text; the direction never joins it.
+    expect(call.contents).toEqual([
+      {
+        role: 'user',
+        parts: [{ text: 'casa', speechMetadata: { style: 'European Portuguese, slowly' } }],
+      },
+    ]);
+  });
+
+  it('sends a bare text part when there is no style', async () => {
+    generateContentMock.mockResolvedValueOnce(audioResponse());
+    await askGemini('casa', { provider: 'gemini', tts: true });
+    expect(generateContentMock.mock.calls[0][0].contents[0].parts).toEqual([{ text: 'casa' }]);
+  });
+
+  it('ignores a blank style rather than sending an empty direction', async () => {
+    generateContentMock.mockResolvedValueOnce(audioResponse());
+    await askGemini('casa', { provider: 'gemini', tts: true, ttsStyle: '   ' });
+    expect(generateContentMock.mock.calls[0][0].contents[0].parts).toEqual([{ text: 'casa' }]);
+  });
+
+  it('does not set a languageCode, which cannot carry a region', async () => {
+    generateContentMock.mockResolvedValueOnce(audioResponse());
+    await askGemini('casa', { provider: 'gemini', tts: true, language: 'pt-PT' });
+    expect(generateContentMock.mock.calls[0][0].config.speechConfig.languageCode).toBeUndefined();
+  });
+
+  it('asks for the voice with the prebuilt shape first', async () => {
+    generateContentMock.mockResolvedValueOnce(audioResponse());
+    await askGemini('casa', { provider: 'gemini', tts: true, voice: 'Kore' });
+    expect(generateContentMock.mock.calls[0][0].config.speechConfig).toEqual({
+      voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+    });
+  });
+
+  it('falls back to the plain voice shape when the API refuses the first', async () => {
+    generateContentMock
+      .mockRejectedValueOnce({ status: 400, message: 'Unknown name "prebuiltVoiceConfig"' })
+      .mockResolvedValueOnce(audioResponse());
+    const result = await askGemini('casa', { provider: 'gemini', tts: true, voice: 'Kore' });
+
+    expect(generateContentMock).toHaveBeenCalledTimes(2);
+    expect(generateContentMock.mock.calls[1][0].config.speechConfig).toEqual({
+      voiceConfig: { voice: 'Kore' },
+    });
+    expect(result.audioData).toBe('QUJD');
+  });
+
+  it('does not retry a failure that is not a refusal', async () => {
+    generateContentMock.mockRejectedValueOnce({ status: 429, message: 'quota' });
+    await expect(askGemini('casa', { provider: 'gemini', tts: true })).rejects.toMatchObject({ status: 429 });
+    expect(generateContentMock).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects an empty TTS prompt with a 400', async () => {
     await expect(askGemini('   ', { provider: 'gemini', tts: true })).rejects.toMatchObject({ status: 400 });
   });

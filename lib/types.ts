@@ -113,9 +113,18 @@ export interface GeminiParams {
    * When true, switches to audio-output mode using responseModalities: ['AUDIO'].
    * The prompt is treated as the text to synthesise, not a text-generation input.
    * Returns audioData (Base64) and mimeType instead of text.
-   * Use a TTS-capable model, e.g. 'gemini-3.1-flash-tts-preview'.
+   * Use a TTS-capable model, e.g. 'gemini-3.8-flash-tts'. Gemini 3.8 TTS
+   * reads the prompt strictly as a verbatim transcript, so directions for how
+   * to read it belong in `ttsStyle`, never in the prompt.
    */
   tts?: boolean;
+  /**
+   * How the transcript should be read: language, accent and region, pace,
+   * tone. Sent as `speech_metadata.style` on the text part, which is where
+   * Gemini 3.8 TTS takes its directions. Older TTS models ignore or refuse it.
+   * Only used when tts: true.
+   */
+  ttsStyle?: string;
   /**
    * Voice name for TTS synthesis. Defaults to 'Sulafat'.
    * Available voices include: Aoede, Charon, Fenrir, Kore, Leda, Orus,

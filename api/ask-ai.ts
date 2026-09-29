@@ -70,6 +70,13 @@ const MAX_MESSAGES = 50;
 const MAX_MESSAGE_LENGTH = 8000;
 
 /**
+ * The direction for how a TTS transcript is read (`providerParams.ttsStyle`).
+ * It is a sentence or two of admin-edited template with a language, a region
+ * and a pace filled in, so a thousand characters is far past any real one.
+ */
+const MAX_TTS_STYLE_LENGTH = 1000;
+
+/**
  * Image limits, and why they are what they are.
  *
  * Vercel rejects a request body over ~4.5MB before this handler ever runs, so
@@ -160,13 +167,19 @@ function ttsCacheRequestFor(body: AskAIRequest) {
   const prompt = body?.prompt;
   if (typeof prompt !== 'string' || prompt.length === 0 || prompt.length > MAX_PROMPT_LENGTH) return null;
 
+  // An invalid style is the validation's to reject, further down; here it
+  // just means "do not touch the cache with it".
+  const style: unknown = params.ttsStyle ?? '';
+  if (typeof style !== 'string' || style.length > MAX_TTS_STYLE_LENGTH) return null;
+
   const model: string = params.model ?? '';
   const voice: string = params.voice ?? '';
 
   return {
-    key: ttsCacheKey({ model, voice, prompt }),
+    key: ttsCacheKey({ model, voice, style, prompt }),
     model,
     voice,
+    style,
     language: typeof params.language === 'string' ? params.language : undefined,
     promptLength: prompt.length,
   };
@@ -466,6 +479,12 @@ async function _handleAskAI(
   if (body.prompt && body.prompt.length > MAX_PROMPT_LENGTH) {
     return errorResponse(res, `prompt exceeds the maximum length of ${MAX_PROMPT_LENGTH} characters`, 400);
   }
+  const ttsStyle = (body.providerParams as any).ttsStyle;
+  if (ttsStyle !== undefined && ttsStyle !== null) {
+    if (typeof ttsStyle !== 'string' || ttsStyle.length > MAX_TTS_STYLE_LENGTH) {
+      return errorResponse(res, `ttsStyle must be a string of at most ${MAX_TTS_STYLE_LENGTH} characters`, 400);
+    }
+  }
   if (body.images) {
     if (!Array.isArray(body.images) || body.images.length > MAX_IMAGES) {
       return errorResponse(res, `images must be an array of at most ${MAX_IMAGES} entries`, 400);
@@ -568,9 +587,9 @@ async function _handleAskAI(
 
     // ── Compress, then keep ──────────────────────────────────────────────
     //
-    // Gemini hands back raw 24 kHz PCM: 48 KB per second, and 64 KB once
-    // base64'd for the response. Compressing it is what makes both halves of
-    // this work — a story paragraph goes from 1.3 MB, which is past
+    // Gemini hands back 24 kHz PCM, raw or (3.8) in a WAV: 48 KB per second,
+    // and 64 KB once base64'd for the response. Compressing it is what makes
+    // both halves of this work — a story paragraph goes from 1.3 MB, which is past
     // Firestore's document ceiling, to about 160 KB, and the listener
     // downloads eight times less either way. See lib/mp3.ts for why the
     // bitrate looks generous.
@@ -592,6 +611,7 @@ async function _handleAskAI(
           mimeType: result.mimeType!,
           voice: ttsRequest.voice,
           model: ttsRequest.model,
+          style: ttsRequest.style,
           language: ttsRequest.language,
           promptLength: ttsRequest.promptLength,
         });

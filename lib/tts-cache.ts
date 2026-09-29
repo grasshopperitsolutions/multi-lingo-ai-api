@@ -10,18 +10,20 @@
  * word Word Search put twelve billable buttons on one screen — any three of
  * which exhausted an Explorer's day on audio they had already heard.
  *
- * ## The key is the rendered prompt, and that is the point
+ * ## The key is model, voice, style and transcript, and that is the point
  *
- * The frontend renders the admin-edited `tts-build-prompt` template — which
- * interpolates the language, the region, the pace and the text — and sends
- * the result as the prompt. Hashing that, with the voice and model, gives a
- * key that already distinguishes everything that changes the recording, and
- * one useful property that would otherwise need remembering: **editing the
- * template changes every key**. An admin who rewords the instruction gets
- * fresh audio everywhere instead of clips that no longer match the template
- * that supposedly produced them. Old entries are orphaned rather than
- * overwritten, which is the safe direction — nothing serves stale audio, and
- * a sweep can reclaim them later if the collection ever justifies one.
+ * Gemini 3.8 TTS takes the text verbatim and the directions separately. The
+ * frontend renders the admin-edited `tts-build-prompt` template into a
+ * **style** (language, region, pace) and sends the reader's text as the
+ * prompt. Hashing both, with the voice and model, gives a key that
+ * distinguishes everything that changes the recording — the same sentence read
+ * in pt-PT and pt-BR, or slowly and naturally, must not share a clip — and one
+ * useful property that would otherwise need remembering: **editing the
+ * template changes every key**. An admin who rewords the style gets fresh
+ * audio everywhere instead of clips that no longer match the template that
+ * supposedly produced them. Old entries are orphaned rather than overwritten,
+ * which is the safe direction — nothing serves stale audio, and a sweep can
+ * reclaim them later if the collection ever justifies one.
  *
  * ## What is not in here
  *
@@ -70,9 +72,14 @@ export interface TtsCacheEntry {
  * the same rendered prompt on the same model get the same recording, however
  * differently they arrived at it.
  */
-export function ttsCacheKey(input: { model: string; voice: string; prompt: string }): string {
+export function ttsCacheKey(input: {
+  model: string;
+  voice: string;
+  style: string;
+  prompt: string;
+}): string {
   return createHash('sha256')
-    .update(`${input.model}\u0000${input.voice}\u0000${input.prompt}`)
+    .update(`${input.model}\u0000${input.voice}\u0000${input.style}\u0000${input.prompt}`)
     .digest('hex');
 }
 
@@ -108,7 +115,13 @@ export async function readTtsClip(key: string): Promise<TtsCacheEntry | null> {
  */
 export async function writeTtsClip(
   key: string,
-  entry: TtsCacheEntry & { voice: string; model: string; language?: string; promptLength: number }
+  entry: TtsCacheEntry & {
+    voice: string;
+    model: string;
+    style: string;
+    language?: string;
+    promptLength: number;
+  }
 ): Promise<boolean> {
   if (entry.audioData.length > MAX_AUDIO_BASE64_BYTES) {
     logWarn('tts_cache_clip_too_large', 'ask-ai', {
@@ -125,6 +138,9 @@ export async function writeTtsClip(
       mimeType: entry.mimeType,
       voice: entry.voice,
       model: entry.model,
+      // Admin-edited text rendered with a language and a pace, never user
+      // data, so it is safe to keep where a person can read it.
+      style: entry.style,
       language: entry.language ?? null,
       promptLength: entry.promptLength,
       bytes: entry.audioData.length,
