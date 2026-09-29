@@ -260,6 +260,15 @@ Rules that hold it together:
   mail queue in Stripe's blast radius (the ERR_REQUIRE_ESM lesson again).
   `tierFromPriceId` moved to `lib/stripe-plans.ts` for the same reason: two
   readers, and `lib/stripe.ts` is mocked wholesale in tests.
+- **Changing a plan's price.** Stripe prices can't be edited, so a new price
+  means a new Price and the plan's `STRIPE_PRICE_*` env var pointed at it.
+  **`tierFromPriceId` only recognises the price ids in those env vars.** So
+  switching the var while anyone is still subscribed on the old price makes
+  their next webhook map them to **explorer**, a silent downgrade of a paying
+  user. Before switching, check the subscriptions on the old price. If there
+  are any, keep the old id recognised (or move those subscriptions to the new
+  price in Stripe) first. Archive the old Price in Stripe only after the var is
+  switched and deployed, or checkout fails on it meanwhile.
 - **Counts only.** No uid, name, email or content is written to any of these
   documents; the frontend's privacy policy §3.4 says so.
 
