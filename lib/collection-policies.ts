@@ -152,6 +152,20 @@ export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
   // handing any signed-in caller a way to page through base64 audio.
   ttsClips: { read: 'admin', write: 'admin' },
 
+  // Pictures for the picture games (lib/pictures.ts). Readable by any signed-in
+  // account, written only by the server: the Admin SDK bypasses this file, so
+  // 'admin' here is what keeps every other caller out. That is the whole
+  // reason the pictures are not a field on `wordPool`, which any signed-in
+  // account may write — a field there could be planted by anyone, and
+  // collection policies have no field-level rules to stop them.
+  //
+  // `conceptPictures` is keyed by the concept id and carries only public
+  // fields. `pictureReports` (who reported which picture) is admin-read: the
+  // pictures are shown to every player, the reporters are nobody's business.
+  conceptPictures: { read: 'authenticated', write: 'admin' },
+  pictureScenes: { read: 'authenticated', write: 'admin' },
+  pictureReports: { read: 'admin', write: 'admin' },
+
   // Public tutor directory. Readable by anyone with a session, guests
   // included, because being findable is the whole point. Writes are locked to
   // the caller's own uid AND to the tiers allowed to be listed — see the
@@ -165,7 +179,6 @@ export const PREFIX_POLICIES: Record<string, CollectionPolicy> = {
   wordLinkGamePool: { read: 'authenticated', write: 'authenticated' },
   wordLadderGamePool: { read: 'authenticated', write: 'authenticated' },
   examExercises: { read: 'authenticated', write: 'authenticated' },
-  examImages: { read: 'authenticated', write: 'authenticated' },
 
   // Grammar library and story pools. Same cache-first contract as the pools
   // above: content is generated once by whoever hits an empty pool and is

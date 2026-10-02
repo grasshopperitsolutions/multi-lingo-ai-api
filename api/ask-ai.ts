@@ -1,11 +1,12 @@
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
-import { verifyAuth } from '../lib/verify-auth';
+import { verifyAuthSession } from '../lib/verify-auth';
 import { askGemini } from '../lib/providers/gemini';
 import { bump, resolveKnownId, safeKey } from '../lib/pulse';
 import { db, FieldValue } from '../lib/firebase-admin';
 import { ttsCacheKey, readTtsClip, writeTtsClip } from '../lib/tts-cache';
 import { compressPcmToMp3 } from '../lib/mp3';
+import { handlePictureRequest, loadSceneImage } from '../lib/pictures';
 import { logInfo, logError, startTimer } from '../lib/logger';
 import { reportError, reportMessage } from '../lib/sentry';
 import type { VercelRequest, VercelResponse, AskAIRequest, SubscriptionTier } from '../lib/types';
@@ -184,6 +185,20 @@ function ttsCacheRequestFor(body: AskAIRequest) {
 }
 
 /**
+ * What a provider failure is answered with: the status the provider gave
+ * (anything outside 4xx/5xx becomes a 500) and its message. Shared by the text
+ * path and the picture path so a failure reads the same from either.
+ */
+function mapUpstreamError(err: any): { upstreamStatus: number; httpStatus: number; message: string } {
+  const upstreamStatus: number = err?.status ?? err?.response?.status ?? err?.statusCode ?? 500;
+  return {
+    upstreamStatus,
+    httpStatus: upstreamStatus >= 400 && upstreamStatus < 600 ? upstreamStatus : 500,
+    message: err?.message ?? 'AI request failed',
+  };
+}
+
+/**
  * The top-level catch, as a wrapper rather than a 290-line `try` around the
  * body below.
  *
@@ -284,8 +299,9 @@ async function _handleAskAI(
     return errorResponse(res, 'Method not allowed', 405);
   }
 
-  const uid = await verifyAuth(req, res);
-  if (!uid) return;
+  const session = await verifyAuthSession(req, res);
+  if (!session) return;
+  const { uid, isAnonymous } = session;
 
   // Anonymous sessions are allowed here, deliberately. They are not a guest
   // tier — the platform requires a login — they are how API access works for
@@ -331,6 +347,74 @@ async function _handleAskAI(
   // The real subscription, as the model swap below uses it — not the quota
   // tier, which paused limits pin to explorer for everyone.
   const pulseTier = safeKey(userData.subscriptionTier ?? 'explorer');
+
+  // ── Pictures ─────────────────────────────────────────────────────────────
+  //
+  // A different job that rides on this endpoint (see lib/pictures.ts): the
+  // request names a concept, never a prompt, and the server draws it once.
+  //
+  // Ahead of the allowance on purpose. Pictures do not spend the daily AI
+  // allowance — being shown decoration you did not ask for should not cost a
+  // call — and what bounds them instead is one picture per word, a per-account
+  // cap, no guests, and the server building every prompt. A picture that
+  // already exists is returned before any of that is even looked at.
+  //
+  // This branch always answers. Nothing else in the request (a prompt, a
+  // model, images) is read, so it cannot be used to steer what is drawn.
+  if (body?.providerParams?.picture !== undefined) {
+    if (body.providerParams.provider !== 'gemini') {
+      return errorResponse(res, 'Unsupported provider', 400);
+    }
+    try {
+      const outcome = await handlePictureRequest(
+        {
+          uid,
+          isAnonymous,
+          // The real subscription, not the quota tier: paused limits pin that
+          // to explorer, which would refuse scenes to every Maestro and let
+          // the admin check below be read off the wrong value.
+          tier: storedTier,
+          unlimited: resolveDailyLimit(storedTier, tiersSnapshot) === null,
+          userData,
+        },
+        body.providerParams.picture
+      );
+      logInfo('picture_request_complete', 'ask-ai', {
+        uid,
+        method: req.method,
+        tier,
+        statusCode: outcome.ok ? 200 : outcome.status,
+        durationMs: elapsed(),
+      });
+      if (!outcome.ok) {
+        return errorResponse(res, outcome.error, outcome.status, { code: outcome.code });
+      }
+      return successResponse(res, { picture: outcome.picture });
+    } catch (err: any) {
+      const { upstreamStatus, httpStatus, message } = mapUpstreamError(err);
+      const extra = { uid, method: req.method, tier, statusCode: httpStatus, durationMs: elapsed(), upstreamStatus };
+      await bump([[['ai', feature, pulseTier, 'errors'], 1]]);
+      if (httpStatus >= 500) {
+        await reportError('picture_request_error', 'ask-ai', err, extra);
+      } else {
+        logError('picture_request_error', 'ask-ai', { ...extra, errorMessage: message });
+      }
+      return errorResponse(res, message, httpStatus);
+    }
+  }
+
+  // ── A scene attached to an ordinary call ─────────────────────────────────
+  //
+  // "Describe the picture" feedback has to look at the scene. The picture is
+  // fetched here, from storage, by id, so it never travels through the browser
+  // (which would need the bucket's CORS and a second upload). Looked up before
+  // the allowance gate: an id that matches nothing must not cost a call.
+  let sceneImage: { data: string; mimeType: string } | null = null;
+  if (body?.providerParams?.sceneId !== undefined) {
+    sceneImage = await loadSceneImage(body.providerParams.sceneId);
+    if (!sceneImage) return errorResponse(res, 'Scene not found', 404);
+    delete body.providerParams.sceneId;
+  }
 
   // ── The Explorer model swap ──────────────────────────────────────────────
   //
@@ -544,7 +628,8 @@ async function _handleAskAI(
     }
   }
 
-  const { prompt, messages, images, audio, providerParams } = body;
+  const { prompt, messages, audio, providerParams } = body;
+  const images = sceneImage ? [...(body.images ?? []), sceneImage] : body.images;
   const provider = providerParams.provider;
 
   const model = providerParams.model ?? 'default';
@@ -627,11 +712,7 @@ async function _handleAskAI(
 
     return successResponse(res, usage ? { ...publicResult, usage } : publicResult);
   } catch (err: any) {
-    const upstreamStatus: number =
-      err?.status ?? err?.response?.status ?? err?.statusCode ?? 500;
-    const httpStatus =
-      upstreamStatus >= 400 && upstreamStatus < 600 ? upstreamStatus : 500;
-    const message = err?.message ?? 'AI request failed';
+    const { upstreamStatus, httpStatus, message } = mapUpstreamError(err);
 
     const extra = {
       uid,

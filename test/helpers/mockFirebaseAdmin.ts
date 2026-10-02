@@ -264,6 +264,7 @@ export const db: any = {
         get: (ref: any) => ref.get(),
         set: (ref: any, data: Record<string, unknown>, options?: unknown) => ref.set(data, options),
         update: (ref: any, data: Record<string, unknown>) => ref.update(data),
+        delete: (ref: any) => ref.delete(),
       })
     );
     transactionChain = run.catch(() => undefined);
@@ -342,6 +343,8 @@ export const auth: any = {
 
 // ── Storage (Google Cloud Storage) ──────────────────────────────────────────
 const storageFiles = new Map<string, Buffer | true>();
+/** Options each file was last saved with, so a test can check what made it public and cacheable. */
+const storageSaveOptions = new Map<string, Record<string, any>>();
 
 function makeFile(filePath: string): any {
   return {
@@ -354,6 +357,20 @@ function makeFile(filePath: string): any {
     },
     async delete() {
       storageFiles.delete(filePath);
+      storageSaveOptions.delete(filePath);
+    },
+    async save(data: Buffer, opts: Record<string, any> = {}) {
+      storageFiles.set(filePath, Buffer.from(data));
+      storageSaveOptions.set(filePath, opts);
+    },
+    async download() {
+      const stored = storageFiles.get(filePath);
+      if (!stored || stored === true) {
+        const err: any = new Error(`No such object: ${filePath}`);
+        err.code = 404;
+        throw err;
+      }
+      return [stored];
     },
   };
 }
@@ -380,6 +397,7 @@ export const __testUtils = {
     authUsers = new Map();
     authTokens = new Map();
     storageFiles.clear();
+    storageSaveOptions.clear();
   },
   seedDoc(collectionPath: string, id: string, data: Record<string, unknown>) {
     collectionMap(collectionPath).set(id, { ...data });
@@ -399,6 +417,18 @@ export const __testUtils = {
   },
   hasStorageFile(filePath: string) {
     return storageFiles.has(filePath);
+  },
+  /** The bytes of a stored file, or undefined (a seeded placeholder has none). */
+  getStorageFile(filePath: string): Buffer | undefined {
+    const stored = storageFiles.get(filePath);
+    return stored && stored !== true ? stored : undefined;
+  },
+  /** What the file was saved with: contentType, public, cache metadata. */
+  getStorageSaveOptions(filePath: string) {
+    return storageSaveOptions.get(filePath);
+  },
+  listStorageFiles(prefix = ''): string[] {
+    return [...storageFiles.keys()].filter((key) => key.startsWith(prefix));
   },
   dumpCollection(collectionPath: string) {
     return Object.fromEntries(collectionMap(collectionPath));

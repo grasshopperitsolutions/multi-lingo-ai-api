@@ -190,6 +190,23 @@ Or delete every file under one of your own folders at once with `{ "prefix": "up
 
 Proxies chat/completion requests to Gemini, the only AI provider. `prompt` is capped at 8,000 characters; `messages` at 50 entries of up to 8,000 characters each. Daily usage quotas (Explorer: 3/day, Voyager: 20/day, Maestro: unlimited) are enforced by default — set `LIMITS_ENFORCED=false` to pause them during testing/beta.
 
+#### Pictures — `providerParams.picture`
+
+A separate mode of the same endpoint, for the picture games. The request names a **concept**, never a prompt:
+
+```json
+{ "providerParams": { "provider": "gemini", "picture": { "conceptId": "abc123" } } }
+```
+
+The server renders every prompt itself (from the `concept-picture-prompt` document and the concept's own `sourceWord`), draws the word once with Gemini's image model, shrinks it to a 512×512 WebP with `sharp`, stores it publicly under `conceptPictures/{conceptId}/{hash}.webp`, and records it in `conceptPictures/{conceptId}`. Every later request for that word returns the stored URL without an AI call.
+
+- **Free of the daily allowance, bounded instead:** one picture per word ever, 30 new pictures a day per account (`PICTURE_DAILY_CAP`), no new pictures for anonymous sessions, and nothing in the request reaches a prompt.
+- **`action`** is `word` (the default), `report` ("this picture does not match its word", once per account), `regenerate` (admin only) or `scene` (`conceptIds`, 4–6 pictured words; unlimited tiers only, 10 a day).
+- **Refusals** carry a `code`: `PICTURE_GUEST` (403), `PICTURE_CAP` (429), `SCENE_TIER` (403).
+- **`providerParams.sceneId`** on an ordinary call attaches that stored scene's image to the request, for the "Describe the picture" feedback.
+
+`conceptPictures` and `pictureScenes` are readable by any signed-in account and written only by the server (`write: 'admin'`, which the Admin SDK bypasses). `pictureReports` (who reported which picture) is admin-read.
+
 ### 5. Stripe - `POST /api/stripe`
 
 Handles Stripe Checkout, Billing Portal sessions, and the Stripe webhook (routed by the presence of a `stripe-signature` header, verified via `STRIPE_WEBHOOK_SECRET` — no separate auth needed for that path). Webhook deliveries are made idempotent by a `stripeEvents/{event.id}` document created with `.create()`, so a Stripe retry is a no-op rather than a duplicate email.
@@ -234,7 +251,7 @@ Authorization: Bearer <token>
   }
 }
 ```
-`subscriptionTier`, `stripeCustomerId`, `stripeSubscriptionId`, `subscriptionStatus`, `currentPeriodEnd`, `cancelAtPeriodEnd`, `aiCallsToday`, and `aiCallsDate` are always stripped from a self-edit (and the Stripe/quota fields are stripped even from an admin edit) — these are only ever set by the Stripe webhook and the ask-ai quota counter.
+`subscriptionTier`, `stripeCustomerId`, `stripeSubscriptionId`, `subscriptionStatus`, `currentPeriodEnd`, `cancelAtPeriodEnd`, `aiCallsToday`, and `aiCallsDate` are always stripped from a self-edit (and the Stripe/quota fields are stripped even from an admin edit) — these are only ever set by the Stripe webhook and the ask-ai quota counter. The picture caps (`picturesToday`, `picturesDate`, `scenesToday`, `scenesDate`, `pictureCapReportedDate`) are protected the same way.
 
 ## Authentication
 

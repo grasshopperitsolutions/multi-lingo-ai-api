@@ -167,11 +167,49 @@ export interface PulseFeature {
   feature?: string;
 }
 
+/**
+ * A picture request: ask-ai's `picture` mode, which names a **concept**, never
+ * a prompt (see lib/pictures.ts).
+ *
+ * The server builds every prompt itself, from the admin-edited template and the
+ * concept's own `sourceWord`, so nothing in this shape can steer what is
+ * drawn. That is the whole point of keeping it out of the browser: the pictures
+ * are shared by every player, and a request that carried text would let anyone
+ * put anything on "gato" for everybody.
+ *
+ * - `word` (the default when `action` is absent): the picture for one concept.
+ *   Returns what exists, or draws it once.
+ * - `report`: "this picture does not match its word". One count per account.
+ * - `regenerate`: admin only; draws the word again under a new file name.
+ * - `scene`: a several-things-in-one picture built from 4–6 pictured concepts,
+ *   for unlimited tiers only.
+ */
+export type PictureRequest =
+  | { action?: 'word'; conceptId: string }
+  | { action: 'report'; conceptId: string }
+  | { action: 'regenerate'; conceptId: string }
+  | { action: 'scene'; conceptIds: string[] };
+
+export interface PictureParams {
+  picture?: PictureRequest;
+}
+
+/**
+ * A scene whose image the server attaches to a normal AI call, so the model
+ * can look at it ("Describe the picture" feedback). The id names a document
+ * in `pictureScenes`; the picture itself never travels through the browser.
+ */
+export interface SceneAttachment {
+  sceneId?: string;
+}
+
 export type ProviderParams = GeminiParams &
   TierModelOverride &
   TtsCacheHint &
   MaintenancePurpose &
-  PulseFeature;
+  PulseFeature &
+  PictureParams &
+  SceneAttachment;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';

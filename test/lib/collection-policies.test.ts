@@ -38,7 +38,7 @@ describe('resolveCollectionPolicy', () => {
   });
 
   it('resolves prefix policies for the shared pool collections', () => {
-    for (const name of ['wordPool', 'wordLinkGamePool', 'wordLadderGamePool', 'examExercises', 'examImages']) {
+    for (const name of ['wordPool', 'wordLinkGamePool', 'wordLadderGamePool', 'examExercises']) {
       expect(resolveCollectionPolicy([name])).toEqual({ read: 'authenticated', write: 'authenticated' });
     }
   });
@@ -58,5 +58,28 @@ describe('resolveCollectionPolicy', () => {
     // appConfig has no prefix-level entry, so this is really just confirming
     // exact-path lookup happens first in the implementation.
     expect(resolveCollectionPolicy(['appConfig', 'config', 'locales']).write).toBe('authenticated');
+  });
+});
+
+describe('picture collections', () => {
+  // The pictures are shared by every player, so the point of keeping them out
+  // of `wordPool` (writable by any signed-in account) is that nobody but the
+  // server can put one there. Read is open to a signed-in caller; write is not.
+  it('are readable by a signed-in caller and writable only by an admin', () => {
+    for (const name of ['conceptPictures', 'pictureScenes']) {
+      expect(resolveCollectionPolicy([name])).toEqual({ read: 'authenticated', write: 'admin' });
+    }
+  });
+
+  it('keep who reported a picture away from every player', () => {
+    expect(resolveCollectionPolicy(['pictureReports'])).toEqual({ read: 'admin', write: 'admin' });
+  });
+
+  it('cover a subcollection under a picture document', () => {
+    expect(resolveCollectionPolicy(['conceptPictures', 'abc', 'anything']).write).toBe('admin');
+  });
+
+  it('no longer lists examImages, which nothing wrote and nothing reads', () => {
+    expect(resolveCollectionPolicy(['examImages'])).toEqual(DEFAULT_POLICY);
   });
 });

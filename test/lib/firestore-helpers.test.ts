@@ -76,6 +76,13 @@ describe('stripProtectedUserFields', () => {
       maintenanceAiCallsToday: 0,
       maintenanceAiCallsDate: '2099-01-01',
       maintenanceCapReportedDate: '2099-01-01',
+      // The picture caps (lib/pictures.ts): resettable by the user, they would
+      // be a way to have the app draw without limit.
+      picturesToday: 0,
+      picturesDate: '2099-01-01',
+      scenesToday: 0,
+      scenesDate: '2099-01-01',
+      pictureCapReportedDate: '2099-01-01',
     };
 
     const strippedNoTier = stripProtectedUserFields(data, false);

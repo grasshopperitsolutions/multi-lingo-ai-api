@@ -271,6 +271,118 @@ async function _askGeminiTts(
 }
 
 // ---------------------------------------------------------------------------
+// Image branch — picture output via responseModalities: ['IMAGE']
+// ---------------------------------------------------------------------------
+
+export interface GeminiImageOptions {
+  model: string;
+  /** '1:1' for a word picture, '4:3' for a scene. */
+  aspectRatio: string;
+  /** '1K' is the only size the Flash-Lite image model offers. */
+  imageSize?: string;
+}
+
+/**
+ * What an image call comes back with. A refusal is a **result**, not an error:
+ * Gemini declining to draw a word (a safety filter, or an answer in words
+ * instead of a picture) is the model answering, and the caller records it on
+ * the word rather than treating it as a fault in the service.
+ */
+export type GeminiImageResult =
+  | {
+      kind: 'image';
+      /** Base64 PNG, as the API returns it. The API cannot return a compressed format. */
+      imageData: string;
+      mimeType: string;
+      model: string;
+      finishReason?: string;
+      tokens?: AskAIResponse['tokens'];
+    }
+  | {
+      kind: 'blocked';
+      /** `IMAGE_SAFETY`, `IMAGE_PROHIBITED_CONTENT`, a prompt block reason, or `NO_IMAGE`. */
+      reason: string;
+      model: string;
+      finishReason?: string;
+      tokens?: AskAIResponse['tokens'];
+    };
+
+/**
+ * Draw one image.
+ *
+ * Deliberately **its own function and not a flag on askGemini's params**. A
+ * `providerParams.image` that the generic /api/ask-ai path honoured would let
+ * any caller have the app's key draw any prompt they typed, which is exactly
+ * what lib/pictures.ts exists to prevent: only that module calls this, with a
+ * prompt it rendered itself.
+ *
+ * Same SDK and the same `generateContent` call as text and speech, so there is
+ * one code path to keep working (Google's newest docs show the Interactions
+ * API instead; not worth a second one for this).
+ *
+ * Throws for provider faults (bad model id, rate limit, a down service), with
+ * the same mapped errors as every other call, so a caller can tell "the model
+ * said no" from "the service is broken".
+ */
+export async function generateGeminiImage(
+  prompt: string,
+  options: GeminiImageOptions
+): Promise<GeminiImageResult> {
+  const { model, aspectRatio, imageSize } = options;
+
+  if (!prompt.trim()) {
+    throw Object.assign(new Error('Image prompt must not be empty.'), { status: 400 });
+  }
+
+  try {
+    const response = await client.models.generateContent({
+      model,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseModalities: ['IMAGE'],
+        imageConfig: { aspectRatio, ...(imageSize ? { imageSize } : {}) },
+        httpOptions: { timeout: 100000 },
+      } as any,
+    });
+
+    const tokens = tokensFrom(response.usageMetadata);
+    const candidate = response.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+
+    // The image is an inline part, but not necessarily the first one: a model
+    // that comments before it draws puts a text part ahead of it.
+    const imagePart = candidate?.content?.parts?.find((part: any) => part?.inlineData?.data) as any;
+    const inlineData = imagePart?.inlineData;
+
+    if (!inlineData?.data) {
+      const reason = String(
+        (response as any).promptFeedback?.blockReason ?? finishReason ?? 'NO_IMAGE'
+      );
+      logWarn('gemini_image_blocked', 'ask-ai', { model, reason, finishReason });
+      return { kind: 'blocked', reason, model, finishReason, tokens };
+    }
+
+    logInfo('gemini_image_generated', 'ask-ai', {
+      model,
+      aspectRatio,
+      mimeType: inlineData.mimeType ?? 'unknown',
+      imageBytes: Math.round((inlineData.data.length * 3) / 4),
+    });
+
+    return {
+      kind: 'image',
+      imageData: inlineData.data,
+      mimeType: inlineData.mimeType ?? 'image/png',
+      model,
+      finishReason,
+      tokens,
+    };
+  } catch (err: any) {
+    throw _mapGeminiError(err, model);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Shared error mapping
 // ---------------------------------------------------------------------------
 

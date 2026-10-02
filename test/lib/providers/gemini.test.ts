@@ -12,7 +12,7 @@ vi.mock('@google/genai', () => ({
   ThinkingLevel: { MINIMAL: 'MINIMAL', LOW: 'LOW', MEDIUM: 'MEDIUM', HIGH: 'HIGH' },
 }));
 
-import { askGemini } from '../../../lib/providers/gemini';
+import { askGemini, generateGeminiImage } from '../../../lib/providers/gemini';
 
 function textResponse(text: string, finishReason = 'STOP') {
   return {
@@ -271,5 +271,106 @@ describe('askGemini — images', () => {
 
     const { contents } = generateContentMock.mock.calls[0][0];
     expect(contents[0].parts).toEqual([{ text: 'just text' }]);
+  });
+});
+
+
+describe('generateGeminiImage — picture output', () => {
+  const options = { model: 'gemini-3.1-flash-lite-image', aspectRatio: '1:1', imageSize: '1K' };
+  const imageResponse = (extra: Record<string, unknown> = {}) => ({
+    candidates: [
+      { content: { parts: [{ inlineData: { data: 'UE5H', mimeType: 'image/png' } }] }, finishReason: 'STOP' },
+    ],
+    usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 1290, thoughtsTokenCount: 0 },
+    ...extra,
+  });
+
+  it('asks for an image only, at the requested ratio and size', async () => {
+    generateContentMock.mockResolvedValueOnce(imageResponse());
+    await generateGeminiImage('a cat', options);
+
+    const call = generateContentMock.mock.calls[0][0];
+    expect(call.model).toBe('gemini-3.1-flash-lite-image');
+    expect(call.contents).toEqual([{ role: 'user', parts: [{ text: 'a cat' }] }]);
+    expect(call.config.responseModalities).toEqual(['IMAGE']);
+    expect(call.config.imageConfig).toEqual({ aspectRatio: '1:1', imageSize: '1K' });
+  });
+
+  it('returns the base64 image, its type and the tokens it cost', async () => {
+    generateContentMock.mockResolvedValueOnce(imageResponse());
+    const result = await generateGeminiImage('a cat', options);
+    expect(result).toEqual({
+      kind: 'image',
+      imageData: 'UE5H',
+      mimeType: 'image/png',
+      model: 'gemini-3.1-flash-lite-image',
+      finishReason: 'STOP',
+      tokens: { input: 30, output: 1290, thinking: 0 },
+    });
+  });
+
+  it('finds the image when a text part comes before it', async () => {
+    generateContentMock.mockResolvedValueOnce({
+      candidates: [
+        {
+          content: { parts: [{ text: 'Here is your cat.' }, { inlineData: { data: 'UE5H', mimeType: 'image/png' } }] },
+          finishReason: 'STOP',
+        },
+      ],
+    });
+    const result = await generateGeminiImage('a cat', options);
+    expect(result.kind).toBe('image');
+  });
+
+  it('leaves imageSize out when none is given', async () => {
+    generateContentMock.mockResolvedValueOnce(imageResponse());
+    await generateGeminiImage('a scene', { model: 'm', aspectRatio: '4:3' });
+    expect(generateContentMock.mock.calls[0][0].config.imageConfig).toEqual({ aspectRatio: '4:3' });
+  });
+
+  it('answers a safety block with a typed result, not an error', async () => {
+    generateContentMock.mockResolvedValueOnce({
+      candidates: [{ content: { parts: [] }, finishReason: 'IMAGE_SAFETY' }],
+    });
+    const result = await generateGeminiImage('a knife', options);
+    expect(result).toMatchObject({ kind: 'blocked', reason: 'IMAGE_SAFETY' });
+  });
+
+  it('reports a blocked prompt by the reason the API gave', async () => {
+    generateContentMock.mockResolvedValueOnce({
+      promptFeedback: { blockReason: 'PROHIBITED_CONTENT' },
+      candidates: [],
+    });
+    const result = await generateGeminiImage('x', options);
+    expect(result).toMatchObject({ kind: 'blocked', reason: 'PROHIBITED_CONTENT' });
+  });
+
+  it('treats an answer in words instead of a picture as blocked', async () => {
+    generateContentMock.mockResolvedValueOnce({
+      candidates: [{ content: { parts: [{ text: 'I cannot draw that.' }] }, finishReason: 'STOP' }],
+    });
+    const result = await generateGeminiImage('x', options);
+    expect(result).toMatchObject({ kind: 'blocked', reason: 'STOP' });
+  });
+
+  it('says NO_IMAGE when nothing at all came back', async () => {
+    generateContentMock.mockResolvedValueOnce({ candidates: [] });
+    const result = await generateGeminiImage('x', options);
+    expect(result).toMatchObject({ kind: 'blocked', reason: 'NO_IMAGE' });
+  });
+
+  it('rejects an empty prompt with a 400, before calling the API', async () => {
+    await expect(generateGeminiImage('  ', options)).rejects.toMatchObject({ status: 400 });
+    expect(generateContentMock).not.toHaveBeenCalled();
+  });
+
+  it('throws a provider fault, mapped like every other call (a retired model is a 422)', async () => {
+    generateContentMock.mockRejectedValueOnce({ status: 404, message: 'models/x is not found' });
+    await expect(generateGeminiImage('a cat', options)).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('maps a rate limit to a 429', async () => {
+    generateContentMock.mockRejectedValueOnce({ status: 429, message: 'quota' });
+    await expect(generateGeminiImage('a cat', options)).rejects.toMatchObject({ status: 429 });
   });
 });
