@@ -183,7 +183,7 @@ describe('getEmailCopy — pt-PT comes from the repo, never from Firestore', () 
     // It lives under `email.*` because that is where locale resolution already
     // happens; a parallel mechanism would be a second thing to keep filled.
     const copy = await getEmailCopy(BASE_LOCALE);
-    expect(copy.reminders.streak_rescue_subject).toBeTruthy();
+    expect(copy.reminders.weekly_goal_subject).toBeTruthy();
     expect(copy.reminders.weekly_review_body).toContain('{{days}}');
   });
 

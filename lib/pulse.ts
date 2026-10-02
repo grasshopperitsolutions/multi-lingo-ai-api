@@ -30,7 +30,7 @@ export const countersRef = (day: string) => PULSE().collection('counters').doc(d
 export const weeksRef = (week: string) => PULSE().collection('weeks').doc(week);
 export const daysRef = (day: string) => PULSE().collection('days').doc(day);
 
-/** UTC day key, the same stamp aiCallsDate and lastStreakDate use. */
+/** UTC day key, the same stamp aiCallsDate uses. */
 export function dayKey(date: Date = new Date()): string {
   return date.toISOString().slice(0, 10);
 }
@@ -172,7 +172,7 @@ export type ClientEvent =
  *
  * `active` is counted **once per user per day and per week**, which is what
  * makes daily actives and weekly retention exact rather than inferred from
- * `lastStreakDate` (a latest-value field that cannot say who was here on a
+ * `lastPracticeDate` (a latest-value field that cannot say who was here on a
  * past day). The marker is `users/{uid}.pulseSeen = { day, week }`: the last
  * day and week this user was counted, never a list of them. It is checked and
  * moved in one transaction, so two tabs opening at once count once.

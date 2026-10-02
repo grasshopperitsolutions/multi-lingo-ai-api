@@ -30,6 +30,9 @@ import {
   localParts,
   needsLessonsRead,
   normalizeReminderPrefs,
+  practiceDaysLast7,
+  practiceDaysThisWeek,
+  resolveWeeklyTarget,
   type ReminderTemplate,
 } from '../lib/reminders';
 import { enqueueEmails, drainQueue, pendingCount, DAILY_SEND_CAP } from '../lib/mail-queue';
@@ -483,7 +486,9 @@ async function handlePracticeReminders(elapsed: () => number) {
       const template = chooseReminder({
         prefs,
         local,
-        dayStreak: typeof data.dayStreak === 'number' ? data.dayStreak : 0,
+        practiceDates: Array.isArray(data.practiceDates) ? data.practiceDates : undefined,
+        lastPracticeDate: typeof data.lastPracticeDate === 'string' ? data.lastPracticeDate : undefined,
+        weeklyTarget: typeof data.weeklyTarget === 'number' ? data.weeklyTarget : undefined,
         lastStreakDate: typeof data.lastStreakDate === 'string' ? data.lastStreakDate : undefined,
         sentAt,
         lessonsRemaining,
@@ -497,8 +502,15 @@ async function handlePracticeReminders(elapsed: () => number) {
       const copy = await getEmailCopy(data.interfaceLang);
       const strings = copy.reminders ?? {};
 
+      // `days` means a different window in each message: this week against the
+      // goal for the nudge, the last seven days for the weekly review.
       const vars = {
-        days: String(data.dayStreak ?? 0),
+        days: String(
+          template === 'weekly_review'
+            ? practiceDaysLast7(data.practiceDates, localDate)
+            : practiceDaysThisWeek(data.practiceDates, localDate),
+        ),
+        target: String(resolveWeeklyTarget(data.weeklyTarget)),
         words: String(Array.isArray(data.seenConceptIds) ? data.seenConceptIds.length : 0),
         n: String(lessonsRemaining ?? 0),
       };

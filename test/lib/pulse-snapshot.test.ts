@@ -18,10 +18,10 @@ beforeEach(() => {
 
   __testUtils.seedDoc('users', 'a', {
     subscriptionTier: 'maestro', subscriptionStatus: 'active', cancelAtPeriodEnd: true,
-    onboardingCompleted: true, createdAt: new Date('2026-09-27T09:00:00Z'), lastStreakDate: DAY,
+    onboardingCompleted: true, createdAt: new Date('2026-09-27T09:00:00Z'), lastPracticeDate: DAY,
   });
   __testUtils.seedDoc('users', 'b', { subscriptionStatus: 'past_due', createdAt: new Date('2026-01-01T00:00:00Z') });
-  __testUtils.seedDoc('users', 'c', { subscriptionTier: 'voyager', subscriptionStatus: 'trialing' });
+  __testUtils.seedDoc('users', 'c', { subscriptionTier: 'voyager', subscriptionStatus: 'trialing', lastStreakDate: DAY }); // the old field still counts
 
   __testUtils.seedAuthUser('a', { providerData: [{}], metadata: { lastRefreshTime: '2026-09-28T05:00:00Z' } });
   __testUtils.seedAuthUser('b', { providerData: [{}], metadata: { lastRefreshTime: '2026-09-10T05:00:00Z' } });
@@ -68,7 +68,7 @@ describe('writeDailySnapshot', () => {
       onboarded: 1,
       signUps: 1,
       subscriptions: { active: 2, pastDue: 1, cancelled: 0, cancelScheduled: 1 },
-      streakActive: 1,
+      practiceActive: 2,
     });
     // Guests have no provider and are not accounts.
     expect(s.lastSeen).toEqual({ within1Day: 1, within7Days: 1, within30Days: 2, accounts: 2 });

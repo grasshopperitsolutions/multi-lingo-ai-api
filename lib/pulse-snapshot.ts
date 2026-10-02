@@ -62,13 +62,13 @@ async function section<T>(name: string, errors: Record<string, string>, fn: () =
 /** Profiles: sizes, tiers, subscription state, sign-ups on the day. */
 async function countUsers(day: string) {
   const snap = await db.collection('users')
-    .select('subscriptionTier', 'subscriptionStatus', 'cancelAtPeriodEnd', 'onboardingCompleted', 'createdAt', 'lastStreakDate')
+    .select('subscriptionTier', 'subscriptionStatus', 'cancelAtPeriodEnd', 'onboardingCompleted', 'createdAt', 'lastPracticeDate', 'lastStreakDate')
     .get();
   const byTier: Counts = {};
   const subscriptions: Counts = { active: 0, pastDue: 0, cancelled: 0, cancelScheduled: 0 };
   let onboarded = 0;
   let signUps = 0;
-  let streakActive = 0;
+  let practiceActive = 0;
   for (const doc of snap.docs) {
     const u = doc.data();
     add(byTier, safeKey(u.subscriptionTier ?? 'explorer'));
@@ -80,15 +80,17 @@ async function countUsers(day: string) {
     if (u.subscriptionStatus === 'canceled') subscriptions.cancelled += 1;
     const created = toMillis(u.createdAt);
     if (created !== null && dayKey(new Date(created)) === day) signUps += 1;
-    if (u.lastStreakDate === day) streakActive += 1;
+    // lastPracticeDate is the device's own day, so around midnight it can sit
+    // a day away from this UTC `day`; a count of people, not an audit.
+    if ((u.lastPracticeDate ?? u.lastStreakDate) === day) practiceActive += 1;
   }
-  return { total: snap.size, byTier, onboarded, signUps, subscriptions, streakActive };
+  return { total: snap.size, byTier, onboarded, signUps, subscriptions, practiceActive };
 }
 
 /**
  * How recently each real account's login token was renewed. Firebase renews
  * it roughly hourly while the app is open, so this is a finer "last seen"
- * than `lastStreakDate`'s one-per-day — and only the Admin SDK can read it.
+ * than `lastPracticeDate`'s one-per-day — and only the Admin SDK can read it.
  * Anonymous accounts (guests) have no provider and are left out.
  */
 async function countLastSeen(nowMs: number) {

@@ -56,14 +56,14 @@ export const EMAIL_COPY_BASE = {
     "cta": "Atualizar o cartão"
   },
   "reminders": {
-    "streak_rescue_subject": "Não percas a tua sequência",
-    "streak_rescue_body": "Vais em {{days}} dias seguidos. Cinco minutos chegam para manteres.",
+    "weekly_goal_subject": "Ainda vais a tempo",
+    "weekly_goal_body": "Dias de prática esta semana: {{days}} de {{target}}. Cinco minutos chegam para mais um.",
     "practice_nudge_subject": "Praticar hoje?",
     "practice_nudge_body": "Cinco minutos e ficas em dia.",
     "lessons_low_subject": "Estás quase sem aulas",
     "lessons_low_body": "Faltam-te {{n}} aulas com o teu explicador. Talvez seja altura de marcar mais.",
     "weekly_review_subject": "A tua semana",
-    "weekly_review_body": "Vais em {{days}} dias seguidos e já guardaste {{words}} palavras. Continua."
+    "weekly_review_body": "Dias de prática nos últimos 7 dias: {{days}}. Já guardaste {{words}} palavras. Continua."
   },
   "account_deleted": {
     "subject": "A tua conta foi eliminada",

@@ -23,16 +23,24 @@
  * wrong hour is worse than not sending, and the field is one visit to Settings
  * away.
  *
- * `lastStreakDate`, though, is written by the frontend as a **UTC** date with
- * no time on it, so mapping it onto a local day is ambiguous by up to a day and
- * has to be resolved on purpose rather than by accident. See
- * `activeUtcDatesForLocalDay` for which way it is resolved and why the obvious
- * alternative is worse.
+ * `lastPracticeDate` and `practiceDates` are written by the frontend as the
+ * device's own calendar day, which is the user's local day, so they compare
+ * directly with `local.date`. The old `lastStreakDate` was a **UTC** date with
+ * no time on it, and mapping that onto a local day is ambiguous by up to a day;
+ * it is still read as a fallback for people who have not opened the app since
+ * the switch. See `activeUtcDatesForLocalDay` for how that is resolved and why
+ * the obvious alternative is worse.
+ *
+ * ## Practice days, not a streak
+ *
+ * The streak reminder ("don't lose your 12-day streak") became a weekly-goal
+ * nudge. Nothing resets and nothing is lost by a missed day, so the message is
+ * only ever "you are at 1 of 3 this week and there is still time".
  */
 
 export type ReminderTemplate =
   | 'weekly_review'
-  | 'streak_rescue'
+  | 'weekly_goal'
   | 'lessons_low'
   | 'practice_nudge';
 
@@ -41,20 +49,35 @@ export type ReminderTemplate =
  * is the one that goes out.
  *
  * Weekly first because it is the only one that is not a nudge — it is the
- * message people actually like receiving, and it fires once a week. Streak
- * rescue above the plain nudge because "you are about to lose a 12-day streak"
- * is worth interrupting someone for and "you haven't practised" mostly is not;
- * where both apply, the rescue is strictly the better message.
+ * message people actually like receiving, and it fires once a week. The weekly
+ * goal above the plain nudge because "1 of 3 this week, and there is still time"
+ * is specific and worth an interruption, and "you haven't practised" mostly is
+ * not; where both apply, the goal message is strictly the better one.
  */
 export const REMINDER_ORDER: ReminderTemplate[] = [
   'weekly_review',
-  'streak_rescue',
+  'weekly_goal',
   'lessons_low',
   'practice_nudge',
 ];
 
-/** A streak shorter than this is not worth interrupting someone to save. */
-export const STREAK_RESCUE_MIN_DAYS = 3;
+/**
+ * The weekdays the weekly-goal nudge may go out on, 0 = Sunday: Thursday and
+ * Saturday. At most two a week by construction, and late enough in the week
+ * that a missed goal is still worth saying, early enough that it is reachable.
+ */
+export const WEEKLY_GOAL_WEEKDAYS = [4, 6];
+
+/** The goal when none is stored, matching the frontend's DEFAULT_WEEKLY_TARGET. */
+export const DEFAULT_WEEKLY_TARGET = 3;
+export const MAX_WEEKLY_TARGET = 7;
+
+/** A stored goal, or the default for anything absent, zero or junk. */
+export function resolveWeeklyTarget(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_WEEKLY_TARGET;
+  return Math.min(Math.floor(n), MAX_WEEKLY_TARGET);
+}
 
 /** At or below this many lessons left, offer the nudge to book more. */
 export const LESSONS_LOW_THRESHOLD = 1;
@@ -71,7 +94,7 @@ export interface ReminderPrefs {
   hour: number;
   /** 0 = Sunday. The day the weekly review goes out. */
   weekday: number;
-  streakRescue: boolean;
+  weeklyGoal: boolean;
   practiceNudge: boolean;
   lessonsLow: boolean;
   weeklyReview: boolean;
@@ -82,13 +105,13 @@ export interface ReminderPrefs {
  * user pressed a button and then a browser dialog — so defaulting the content
  * to off would mean they granted permission and then received nothing.
  *
- * The plain nudge being on is safe because it can never stack with the streak
- * rescue: they are ranked, and only one is ever sent.
+ * The plain nudge being on is safe because it can never stack with the weekly
+ * goal: they are ranked, and only one is ever sent.
  */
 export const DEFAULT_REMINDER_PREFS: ReminderPrefs = {
   hour: 19,
   weekday: 0,
-  streakRescue: true,
+  weeklyGoal: true,
   practiceNudge: true,
   lessonsLow: true,
   weeklyReview: true,
@@ -107,8 +130,13 @@ export function normalizeReminderPrefs(stored: unknown): ReminderPrefs {
   if (typeof raw.weekday === 'number' && Number.isInteger(raw.weekday) && raw.weekday >= 0 && raw.weekday <= 6) {
     result.weekday = raw.weekday;
   }
-  for (const key of ['streakRescue', 'practiceNudge', 'lessonsLow', 'weeklyReview'] as const) {
+  for (const key of ['weeklyGoal', 'practiceNudge', 'lessonsLow', 'weeklyReview'] as const) {
     if (typeof raw[key] === 'boolean') result[key] = raw[key] as boolean;
+  }
+  // The streak reminder became the weekly-goal nudge. Someone who had switched
+  // it off has not asked for its replacement, so the old answer carries over.
+  if (typeof raw.weeklyGoal !== 'boolean' && raw.streakRescue === false) {
+    result.weeklyGoal = false;
   }
   return result;
 }
@@ -201,12 +229,49 @@ export function daysBetween(earlier: string | undefined, later: string): number 
   return Math.round((b - a) / 86_400_000);
 }
 
+/** A YYYY-MM-DD moved by whole days, in plain calendar arithmetic (no zone). */
+export function shiftDate(date: string, days: number): string {
+  const t = Date.parse(`${date}T00:00:00Z`);
+  if (Number.isNaN(t)) return date;
+  return utcDate(new Date(t + days * 86_400_000));
+}
+
+/** The Monday of the ISO week that `date` falls in. */
+export function weekStart(date: string): string {
+  const t = Date.parse(`${date}T00:00:00Z`);
+  if (Number.isNaN(t)) return date;
+  const day = new Date(t).getUTCDay(); // 0 = Sunday
+  return shiftDate(date, -((day + 6) % 7));
+}
+
+/** Practice days in the ISO week ending on (and including) `localDate`. */
+export function practiceDaysThisWeek(dates: string[] | undefined, localDate: string): number {
+  if (!Array.isArray(dates)) return 0;
+  const monday = weekStart(localDate);
+  return new Set(dates.filter((d) => typeof d === 'string' && d >= monday && d <= localDate)).size;
+}
+
+/** Practice days in the seven days ending on (and including) `localDate`. */
+export function practiceDaysLast7(dates: string[] | undefined, localDate: string): number {
+  if (!Array.isArray(dates)) return 0;
+  const from = shiftDate(localDate, -6);
+  return new Set(dates.filter((d) => typeof d === 'string' && d >= from && d <= localDate)).size;
+}
+
 export interface ReminderInput {
   prefs: ReminderPrefs;
   local: LocalParts;
-  /** users/{uid}.dayStreak */
-  dayStreak: number;
-  /** users/{uid}.lastStreakDate, a UTC YYYY-MM-DD. */
+  /** users/{uid}.practiceDates, device-local YYYY-MM-DD. */
+  practiceDates?: string[];
+  /** users/{uid}.lastPracticeDate, device-local YYYY-MM-DD. */
+  lastPracticeDate?: string;
+  /** users/{uid}.weeklyTarget; absent or zero means the default. */
+  weeklyTarget?: number;
+  /**
+   * users/{uid}.lastStreakDate, a UTC YYYY-MM-DD. The old field: only read when
+   * there is no `lastPracticeDate`, for people who have not opened the app
+   * since the switch.
+   */
   lastStreakDate?: string;
   /** users/{uid}.reminderSentAt — template -> local YYYY-MM-DD it last went out. */
   sentAt: Record<string, string>;
@@ -225,19 +290,35 @@ export interface ReminderInput {
  * which is what keeps an hourly job cheap.
  */
 export function chooseReminder(input: ReminderInput): ReminderTemplate | null {
-  const { prefs, local, dayStreak, lastStreakDate, sentAt, lessonsRemaining, now = new Date() } = input;
+  const {
+    prefs, local, practiceDates, lastPracticeDate, weeklyTarget, lastStreakDate, sentAt, lessonsRemaining, now = new Date(),
+  } = input;
 
   // Everything is delivered at the user's chosen hour; the weekly review just
   // additionally requires the right day.
   if (local.hour !== prefs.hour) return null;
 
-  const practisedToday = lastStreakDate
-    ? activeUtcDatesForLocalDay(local, now).includes(lastStreakDate)
-    : false;
+  const practisedToday = lastPracticeDate
+    ? lastPracticeDate === local.date
+    : lastStreakDate
+      ? activeUtcDatesForLocalDay(local, now).includes(lastStreakDate)
+      : false;
+
+  // The goal is still reachable when the days still to come, today included
+  // (the nudge only fires if today has not been practised), can close the gap.
+  // Nobody is nudged about a target that can no longer be met this week.
+  const target = resolveWeeklyTarget(weeklyTarget);
+  const doneThisWeek = practiceDaysThisWeek(practiceDates, local.date);
+  const daysLeftIncludingToday = 7 - ((local.weekday + 6) % 7);
+  const goalReachable = doneThisWeek < target && target - doneThisWeek <= daysLeftIncludingToday;
 
   const isDue: Record<ReminderTemplate, boolean> = {
     weekly_review: prefs.weeklyReview && local.weekday === prefs.weekday,
-    streak_rescue: prefs.streakRescue && dayStreak >= STREAK_RESCUE_MIN_DAYS && !practisedToday,
+    weekly_goal:
+      prefs.weeklyGoal &&
+      WEEKLY_GOAL_WEEKDAYS.includes(local.weekday) &&
+      goalReachable &&
+      !practisedToday,
     lessons_low:
       prefs.lessonsLow &&
       typeof lessonsRemaining === 'number' &&
@@ -249,7 +330,7 @@ export function chooseReminder(input: ReminderInput): ReminderTemplate | null {
   for (const template of REMINDER_ORDER) {
     // Already sent today: not a candidate, but the next one down still is —
     // a user who got their weekly review this morning can still be told at
-    // their evening hour that their streak is about to break.
+    // their evening hour that their weekly goal is still within reach.
     if (sentAt[template] === local.date) continue;
     if (isDue[template]) return template;
   }

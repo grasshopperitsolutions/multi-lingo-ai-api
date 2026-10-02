@@ -7,7 +7,11 @@ import {
   activeUtcDatesForLocalDay,
   daysBetween,
   DEFAULT_REMINDER_PREFS,
+  DEFAULT_WEEKLY_TARGET,
   LESSONS_LOW_COOLDOWN_DAYS,
+  practiceDaysLast7,
+  practiceDaysThisWeek,
+  resolveWeeklyTarget,
 } from '../../lib/reminders';
 
 /**
@@ -15,13 +19,12 @@ import {
  *
  * This is the half of the reminder system that can be wrong without anything
  * crashing: a user gets two notifications instead of one, or gets told to save
- * a streak they already saved, or gets nothing because their clock disagrees
+ * a goal they already met, or gets nothing because their clock disagrees
  * with the server's. None of that surfaces in a log.
  */
 
 const base = {
   prefs: DEFAULT_REMINDER_PREFS,
-  dayStreak: 0,
   sentAt: {} as Record<string, string>,
 };
 
@@ -72,6 +75,13 @@ describe('activeUtcDatesForLocalDay', () => {
   });
 });
 
+/** 19:00 on a Thursday in Lisbon, in the week of Monday 2026-09-14. */
+const thursdayEvening = new Date('2026-09-17T18:00:00Z');
+const lisbonThursday = localParts('Europe/Lisbon', thursdayEvening)!;
+/** 19:00 on the Saturday of that week. */
+const saturdayEvening = new Date('2026-09-19T18:00:00Z');
+const lisbonSaturday = localParts('Europe/Lisbon', saturdayEvening)!;
+
 describe('chooseReminder', () => {
   it('returns null in the 23 hours that are not the user\'s', () => {
     const local = localParts('Europe/Lisbon', new Date('2026-09-16T09:00:00Z'))!;
@@ -79,53 +89,137 @@ describe('chooseReminder', () => {
   });
 
   it('sends at most one reminder even when several are due', () => {
-    // A Sunday evening with a live streak and no practice today: the weekly
-    // review, the streak rescue and the plain nudge all qualify.
+    // A Sunday evening with no practice today: the weekly review and the plain
+    // nudge both qualify (the weekly goal never goes out on a Sunday).
     const now = new Date('2026-09-20T18:00:00Z'); // Sunday
     const local = localParts('Europe/Lisbon', now)!;
 
     const chosen = chooseReminder({
       ...base, local, now,
-      dayStreak: 12,
-      lastStreakDate: '2026-09-19',
+      lastPracticeDate: '2026-09-19',
     });
 
     expect(chosen).toBe('weekly_review');
   });
 
-  it('prefers the streak rescue to the plain nudge', () => {
-    const chosen = chooseReminder({
-      ...base, local: lisbonEvening, now: wednesdayEvening,
-      dayStreak: 12,
-      lastStreakDate: '2026-09-15',
+  describe('the weekly-goal nudge', () => {
+    it('goes out on a Thursday when the goal is still within reach', () => {
+      const chosen = chooseReminder({
+        ...base, local: lisbonThursday, now: thursdayEvening,
+        practiceDates: ['2026-09-14'],
+        lastPracticeDate: '2026-09-14',
+      });
+      expect(chosen).toBe('weekly_goal');
     });
-    expect(chosen).toBe('streak_rescue');
+
+    it('goes out on a Saturday, and only on Thursday and Saturday', () => {
+      const input = { ...base, practiceDates: ['2026-09-14'], lastPracticeDate: '2026-09-14' };
+      expect(chooseReminder({ ...input, local: lisbonSaturday, now: saturdayEvening })).toBe('weekly_goal');
+
+      // Wednesday is a nudge day for the plain reminder, never for the goal.
+      expect(chooseReminder({ ...input, local: lisbonEvening, now: wednesdayEvening })).toBe('practice_nudge');
+    });
+
+    it('stays quiet once the goal is met', () => {
+      const chosen = chooseReminder({
+        ...base, local: lisbonThursday, now: thursdayEvening,
+        practiceDates: ['2026-09-14', '2026-09-15', '2026-09-16'],
+        lastPracticeDate: '2026-09-16',
+      });
+      // Falls through to the plain nudge, which is a different message.
+      expect(chosen).toBe('practice_nudge');
+    });
+
+    it('stays quiet when the goal can no longer be reached this week', () => {
+      // Saturday with 0 of 3: Saturday and Sunday are two days, the gap is
+      // three. Nagging about a target that cannot be met is the old streak
+      // guilt under a new name.
+      const chosen = chooseReminder({
+        ...base, local: lisbonSaturday, now: saturdayEvening,
+        practiceDates: [],
+        lastPracticeDate: '2026-09-10',
+      });
+      expect(chosen).toBe('practice_nudge');
+    });
+
+    it('is still reachable on a Saturday with two days done', () => {
+      const chosen = chooseReminder({
+        ...base, local: lisbonSaturday, now: saturdayEvening,
+        practiceDates: ['2026-09-14', '2026-09-16'],
+        lastPracticeDate: '2026-09-16',
+      });
+      expect(chosen).toBe('weekly_goal');
+    });
+
+    it('does not count last week\'s days towards this week', () => {
+      const chosen = chooseReminder({
+        ...base, local: lisbonThursday, now: thursdayEvening,
+        practiceDates: ['2026-09-10', '2026-09-11', '2026-09-13'], // all the week before
+        lastPracticeDate: '2026-09-13',
+      });
+      expect(chosen).toBe('weekly_goal');
+    });
+
+    it('measures against the stored goal, defaulting to three', () => {
+      const days = ['2026-09-14', '2026-09-15', '2026-09-16'];
+      const common = { ...base, local: lisbonThursday, now: thursdayEvening, practiceDates: days, lastPracticeDate: '2026-09-16' };
+      expect(chooseReminder({ ...common, weeklyTarget: 5 })).toBe('weekly_goal');
+      expect(chooseReminder({ ...common, weeklyTarget: 3 })).toBe('practice_nudge');
+      expect(chooseReminder({ ...common, weeklyTarget: 0 })).toBe('practice_nudge'); // 0 = default 3, met
+    });
+
+    it('does not fire for someone who already practised today', () => {
+      const chosen = chooseReminder({
+        ...base, local: lisbonThursday, now: thursdayEvening,
+        practiceDates: ['2026-09-14', '2026-09-17'],
+        lastPracticeDate: '2026-09-17',
+      });
+      expect(chosen).toBeNull();
+    });
   });
 
-  it('falls back to the nudge when the streak is too short to be worth saving', () => {
-    const chosen = chooseReminder({
-      ...base, local: lisbonEvening, now: wednesdayEvening,
-      dayStreak: 1,
-      lastStreakDate: '2026-09-15',
-    });
+  it('falls back to the plain nudge for someone with no practice history at all', () => {
+    const chosen = chooseReminder({ ...base, local: lisbonEvening, now: wednesdayEvening });
     expect(chosen).toBe('practice_nudge');
   });
 
   it('says nothing to someone who already practised today', () => {
     const chosen = chooseReminder({
       ...base, local: lisbonEvening, now: wednesdayEvening,
-      dayStreak: 12,
-      lastStreakDate: '2026-09-16',
+      lastPracticeDate: '2026-09-16',
     });
     expect(chosen).toBeNull();
   });
 
-  it('does not repeat a template already sent on the user\'s local date', () => {
+  it('still reads the old UTC stamp for someone who has not opened the app since the switch', () => {
+    const today = chooseReminder({
+      ...base, local: lisbonEvening, now: wednesdayEvening,
+      lastStreakDate: '2026-09-16',
+    });
+    expect(today).toBeNull();
+
+    const yesterday = chooseReminder({
+      ...base, local: lisbonEvening, now: wednesdayEvening,
+      lastStreakDate: '2026-09-15',
+    });
+    expect(yesterday).toBe('practice_nudge');
+  });
+
+  it('trusts lastPracticeDate over a stale lastStreakDate', () => {
     const chosen = chooseReminder({
       ...base, local: lisbonEvening, now: wednesdayEvening,
-      dayStreak: 12,
-      lastStreakDate: '2026-09-15',
-      sentAt: { streak_rescue: '2026-09-16' },
+      lastPracticeDate: '2026-09-15',
+      lastStreakDate: '2026-09-16', // would read as practised today, but is the old field
+    });
+    expect(chosen).toBe('practice_nudge');
+  });
+
+  it('does not repeat a template already sent on the user\'s local date', () => {
+    const chosen = chooseReminder({
+      ...base, local: lisbonThursday, now: thursdayEvening,
+      practiceDates: ['2026-09-14'],
+      lastPracticeDate: '2026-09-14',
+      sentAt: { weekly_goal: '2026-09-17' },
     });
     // Falls through to the next candidate rather than going silent.
     expect(chosen).toBe('practice_nudge');
@@ -134,10 +228,10 @@ describe('chooseReminder', () => {
   it('honours a switched-off reminder', () => {
     const chosen = chooseReminder({
       ...base,
-      prefs: { ...DEFAULT_REMINDER_PREFS, streakRescue: false, practiceNudge: false },
-      local: lisbonEvening, now: wednesdayEvening,
-      dayStreak: 12,
-      lastStreakDate: '2026-09-15',
+      prefs: { ...DEFAULT_REMINDER_PREFS, weeklyGoal: false, practiceNudge: false },
+      local: lisbonThursday, now: thursdayEvening,
+      practiceDates: ['2026-09-14'],
+      lastPracticeDate: '2026-09-14',
     });
     expect(chosen).toBeNull();
   });
@@ -145,7 +239,7 @@ describe('chooseReminder', () => {
   it('warns about low lessons, then stays quiet for the cooldown', () => {
     const due = chooseReminder({
       ...base,
-      prefs: { ...DEFAULT_REMINDER_PREFS, streakRescue: false, practiceNudge: false },
+      prefs: { ...DEFAULT_REMINDER_PREFS, weeklyGoal: false, practiceNudge: false },
       local: lisbonEvening, now: wednesdayEvening,
       lessonsRemaining: 1,
     });
@@ -154,12 +248,42 @@ describe('chooseReminder', () => {
     // Sitting at one lesson for a month must not mean a push every evening.
     const tooSoon = chooseReminder({
       ...base,
-      prefs: { ...DEFAULT_REMINDER_PREFS, streakRescue: false, practiceNudge: false },
+      prefs: { ...DEFAULT_REMINDER_PREFS, weeklyGoal: false, practiceNudge: false },
       local: lisbonEvening, now: wednesdayEvening,
       lessonsRemaining: 1,
       sentAt: { lessons_low: '2026-09-14' },
     });
     expect(tooSoon).toBeNull();
+  });
+});
+
+describe('practice day counting', () => {
+  it('counts the ISO week, Monday first, up to and including today', () => {
+    // Wednesday 2026-09-16: the week is 14th to 16th so far.
+    const dates = ['2026-09-13', '2026-09-14', '2026-09-16', '2026-09-17'];
+    expect(practiceDaysThisWeek(dates, '2026-09-16')).toBe(2);
+  });
+
+  it('counts a week that crosses a month boundary', () => {
+    expect(practiceDaysThisWeek(['2026-09-29', '2026-09-30', '2026-10-01'], '2026-10-01')).toBe(3);
+  });
+
+  it('counts the last seven days, not the calendar week', () => {
+    // Monday 2026-09-21: the window reaches back to Tuesday the 15th.
+    const dates = ['2026-09-14', '2026-09-15', '2026-09-20', '2026-09-21'];
+    expect(practiceDaysLast7(dates, '2026-09-21')).toBe(3);
+  });
+
+  it('ignores junk and duplicates', () => {
+    expect(practiceDaysThisWeek(undefined, '2026-09-16')).toBe(0);
+    expect(practiceDaysThisWeek(['2026-09-16', '2026-09-16', 5 as unknown as string], '2026-09-16')).toBe(1);
+  });
+
+  it('resolves a goal to a whole number of days in a week, defaulting to three', () => {
+    expect(resolveWeeklyTarget(undefined)).toBe(DEFAULT_WEEKLY_TARGET);
+    expect(resolveWeeklyTarget(0)).toBe(3);
+    expect(resolveWeeklyTarget(4)).toBe(4);
+    expect(resolveWeeklyTarget(30)).toBe(7);
   });
 });
 
@@ -194,9 +318,17 @@ describe('normalizeReminderPrefs', () => {
   });
 
   it('keeps the defaults for anything malformed', () => {
-    const prefs = normalizeReminderPrefs({ streakRescue: 'yes', weekday: 9 });
-    expect(prefs.streakRescue).toBe(true);
+    const prefs = normalizeReminderPrefs({ weeklyGoal: 'yes', weekday: 9 });
+    expect(prefs.weeklyGoal).toBe(true);
     expect(prefs.weekday).toBe(DEFAULT_REMINDER_PREFS.weekday);
+  });
+
+  it('carries an old streak-reminder opt-out over to its replacement', () => {
+    expect(normalizeReminderPrefs({ streakRescue: false }).weeklyGoal).toBe(false);
+    // Someone who left the old one on is simply on.
+    expect(normalizeReminderPrefs({ streakRescue: true }).weeklyGoal).toBe(true);
+    // An explicit answer to the new one wins.
+    expect(normalizeReminderPrefs({ streakRescue: false, weeklyGoal: true }).weeklyGoal).toBe(true);
   });
 });
 
