@@ -2,18 +2,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createMockReqRes, bearer } from '../helpers/httpMocks';
 
 vi.mock('../../lib/firebase-admin', () => import('../helpers/mockFirebaseAdmin'));
-vi.mock('../../lib/providers/openai', () => ({
-  askOpenAI: vi.fn(async () => ({ text: 'openai-response', provider: 'openai', model: 'gpt-4o-mini' })),
-}));
-vi.mock('../../lib/providers/perplexity', () => ({
-  askPerplexity: vi.fn(async () => ({ text: 'perplexity-response', provider: 'perplexity', model: 'sonar' })),
-}));
 vi.mock('../../lib/providers/gemini', () => ({
   askGemini: vi.fn(async () => ({ text: 'gemini-response', provider: 'gemini', model: 'gemini-3.5-flash-lite' })),
 }));
 
 import { __testUtils } from '../helpers/mockFirebaseAdmin';
-import { askOpenAI } from '../../lib/providers/openai';
 import { askGemini } from '../../lib/providers/gemini';
 import handler from '../../api/ask-ai';
 
@@ -29,10 +22,26 @@ describe('POST /api/ask-ai — auth and validation', () => {
   it('rejects unauthenticated requests', async () => {
     const { req, res } = createMockReqRes({
       method: 'POST',
-      body: { prompt: 'hi', providerParams: { provider: 'openai' } },
+      body: { prompt: 'hi', providerParams: { provider: 'gemini' } },
     });
     await handler(req, res);
     expect(res.statusCode).toBe(401);
+  });
+
+  it('refuses an unknown provider instead of falling back to another vendor', async () => {
+    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
+    for (const provider of ['openai', 'perplexity', 'gemin1']) {
+      const { req, res } = createMockReqRes({
+        method: 'POST',
+        headers: bearer(TOKEN_ALICE),
+        body: { prompt: 'hi', providerParams: { provider } },
+      });
+      await handler(req, res);
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toMatch(/Unsupported provider/);
+    }
+    // Nothing was called, so nothing was billed.
+    expect(askGemini).not.toHaveBeenCalled();
   });
 
   it('requires providerParams.provider', async () => {
@@ -51,7 +60,7 @@ describe('POST /api/ask-ai — auth and validation', () => {
     const { req, res } = createMockReqRes({
       method: 'POST',
       headers: bearer(TOKEN_ALICE),
-      body: { providerParams: { provider: 'openai' } },
+      body: { providerParams: { provider: 'gemini' } },
     });
     await handler(req, res);
     expect(res.statusCode).toBe(400);
@@ -62,11 +71,11 @@ describe('POST /api/ask-ai — auth and validation', () => {
     const { req, res } = createMockReqRes({
       method: 'POST',
       headers: bearer(TOKEN_ALICE),
-      body: { prompt: 'x'.repeat(8001), providerParams: { provider: 'openai' } },
+      body: { prompt: 'x'.repeat(8001), providerParams: { provider: 'gemini' } },
     });
     await handler(req, res);
     expect(res.statusCode).toBe(400);
-    expect(askOpenAI).not.toHaveBeenCalled();
+    expect(askGemini).not.toHaveBeenCalled();
   });
 
   it('rejects too many messages', async () => {
@@ -75,7 +84,7 @@ describe('POST /api/ask-ai — auth and validation', () => {
     const { req, res } = createMockReqRes({
       method: 'POST',
       headers: bearer(TOKEN_ALICE),
-      body: { messages, providerParams: { provider: 'openai' } },
+      body: { messages, providerParams: { provider: 'gemini' } },
     });
     await handler(req, res);
     expect(res.statusCode).toBe(400);
@@ -86,13 +95,13 @@ describe('POST /api/ask-ai — auth and validation', () => {
     const { req, res } = createMockReqRes({
       method: 'POST',
       headers: bearer(TOKEN_ALICE),
-      body: { messages: [{ role: 'user', content: 'x'.repeat(8001) }], providerParams: { provider: 'openai' } },
+      body: { messages: [{ role: 'user', content: 'x'.repeat(8001) }], providerParams: { provider: 'gemini' } },
     });
     await handler(req, res);
     expect(res.statusCode).toBe(400);
   });
 
-  it('routes to the requested provider', async () => {
+  it('calls Gemini, the only provider', async () => {
     __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'maestro' });
     const { req, res } = createMockReqRes({
       method: 'POST',
@@ -102,7 +111,6 @@ describe('POST /api/ask-ai — auth and validation', () => {
     await handler(req, res);
     expect(res.statusCode).toBe(200);
     expect(askGemini).toHaveBeenCalled();
-    expect(askOpenAI).not.toHaveBeenCalled();
   });
 });
 
@@ -114,7 +122,7 @@ describe('POST /api/ask-ai — quota enforcement (finding 2.4)', () => {
       const { req, res } = createMockReqRes({
         method: 'POST',
         headers: bearer(TOKEN_ALICE),
-        body: { prompt: 'hi', providerParams: { provider: 'openai' } },
+        body: { prompt: 'hi', providerParams: { provider: 'gemini' } },
       });
       await handler(req, res);
       expect(res.statusCode).toBe(200);
@@ -123,7 +131,7 @@ describe('POST /api/ask-ai — quota enforcement (finding 2.4)', () => {
     const { req, res } = createMockReqRes({
       method: 'POST',
       headers: bearer(TOKEN_ALICE),
-      body: { prompt: 'hi', providerParams: { provider: 'openai' } },
+      body: { prompt: 'hi', providerParams: { provider: 'gemini' } },
     });
     await handler(req, res);
     expect(res.statusCode).toBe(429);
@@ -135,7 +143,7 @@ describe('POST /api/ask-ai — quota enforcement (finding 2.4)', () => {
       const { req, res } = createMockReqRes({
         method: 'POST',
         headers: bearer(TOKEN_ALICE),
-        body: { prompt: 'hi', providerParams: { provider: 'openai' } },
+        body: { prompt: 'hi', providerParams: { provider: 'gemini' } },
       });
       await handler(req, res);
       expect(res.statusCode).toBe(200);
@@ -166,7 +174,7 @@ describe('POST /api/ask-ai — LIMITS_ENFORCED=false opt-out', () => {
       const { req, res } = createMockReqRes({
         method: 'POST',
         headers: bearer(TOKEN_ALICE),
-        body: { prompt: 'hi', providerParams: { provider: 'openai' } },
+        body: { prompt: 'hi', providerParams: { provider: 'gemini' } },
       });
       await freshHandler(req, res);
       expect(res.statusCode).toBe(200);
@@ -211,10 +219,9 @@ describe('POST /api/ask-ai — images', () => {
     expect((askGemini as any).mock.calls[0][3]).toEqual([image]);
   });
 
-  it('refuses images on a provider that cannot see them', async () => {
+  it('refuses images with any provider other than Gemini', async () => {
     // Dropping them silently would answer confidently about a picture the
-    // model never saw, which reads as a bad answer rather than an
-    // unsupported request.
+    // model never saw. The unsupported-provider check now covers this.
     const { req, res } = post({
       prompt: 'read this page',
       images: [image],
@@ -223,7 +230,7 @@ describe('POST /api/ask-ai — images', () => {
     await handler(req, res);
 
     expect(res.statusCode).toBe(400);
-    expect(askOpenAI).not.toHaveBeenCalled();
+    expect(askGemini).not.toHaveBeenCalled();
   });
 
   it('rejects a data: prefix rather than passing it to the model', async () => {
@@ -339,19 +346,6 @@ describe('POST /api/ask-ai — the Explorer model', () => {
 
     expect(modelUsed()).toBe('big-model');
   });
-
-  it('applies to every provider, not just gemini', async () => {
-    __testUtils.seedDoc('users', 'alice', { subscriptionTier: 'explorer' });
-    const { req, res } = post({
-      prompt: 'hi',
-      providerParams: { provider: 'openai', model: 'big-model', explorerModel: 'small-model' },
-    });
-    await handler(req, res);
-
-    // The split is a tier decision, not a Gemini one — tutor link validation
-    // runs on OpenAI and is exactly the kind of call worth making cheaper.
-    expect((askOpenAI as any).mock.calls[0][1].model).toBe('small-model');
-  });
 });
 
 describe('POST /api/ask-ai — audio', () => {
@@ -395,7 +389,7 @@ describe('POST /api/ask-ai — audio', () => {
     expect(res.statusCode).toBe(200);
   });
 
-  it('refuses audio on a provider that cannot hear it', async () => {
+  it('refuses audio with any provider other than Gemini', async () => {
     // Dropping it silently would return confident pronunciation feedback on a
     // recording that never reached a model.
     const { req, res } = post({
@@ -406,6 +400,7 @@ describe('POST /api/ask-ai — audio', () => {
     await handler(req, res);
 
     expect(res.statusCode).toBe(400);
+    expect(askGemini).not.toHaveBeenCalled();
   });
 
   it('rejects a data: prefix, a foreign format and an oversized clip', async () => {

@@ -188,7 +188,7 @@ Or delete every file under one of your own folders at once with `{ "prefix": "up
 
 ### 4. AI - `POST /api/ask-ai`
 
-Proxies chat/completion requests to OpenAI, Gemini, or Perplexity. `prompt` is capped at 8,000 characters; `messages` at 50 entries of up to 8,000 characters each. Daily usage quotas (Explorer: 3/day, Voyager: 20/day, Maestro: unlimited) are enforced by default — set `LIMITS_ENFORCED=false` to pause them during testing/beta.
+Proxies chat/completion requests to Gemini, the only AI provider. `prompt` is capped at 8,000 characters; `messages` at 50 entries of up to 8,000 characters each. Daily usage quotas (Explorer: 3/day, Voyager: 20/day, Maestro: unlimited) are enforced by default — set `LIMITS_ENFORCED=false` to pause them during testing/beta.
 
 ### 5. Stripe - `POST /api/stripe`
 
@@ -264,7 +264,7 @@ Required environment variables:
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`: Stripe API credentials
 - `STRIPE_PRICE_VOYAGER_MONTHLY`, `STRIPE_PRICE_VOYAGER_YEARLY`, `STRIPE_PRICE_MAESTRO_MONTHLY`, `STRIPE_PRICE_MAESTRO_YEARLY`: Stripe Price IDs
 - `FRONTEND_URL`: used for Stripe redirect URLs and as the default CORS-allowed origin
-- `OPENAI_API_KEY`, `GEMINI_API_KEY`, `PERPLEXITY_API_KEY`: AI provider credentials
+- `GEMINI_API_KEY`: AI provider credential
 
 Required for email notifications (`/api/email`, plus the welcome / billing / account-deletion mail sent inline from `api/auth.ts`, `api/stripe.ts` and `lib/delete-user-account.ts`):
 - `RESEND_API_KEY`: Resend API key. The sending domain must be DNS-verified (SPF + DKIM) in the Resend dashboard first.

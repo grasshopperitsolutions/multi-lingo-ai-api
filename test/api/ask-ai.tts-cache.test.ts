@@ -13,12 +13,6 @@ import { createMockReqRes, bearer } from '../helpers/httpMocks';
  */
 
 vi.mock('../../lib/firebase-admin', () => import('../helpers/mockFirebaseAdmin'));
-vi.mock('../../lib/providers/openai', () => ({
-  askOpenAI: vi.fn(async () => ({ text: 'openai-response', provider: 'openai', model: 'gpt-4o-mini' })),
-}));
-vi.mock('../../lib/providers/perplexity', () => ({
-  askPerplexity: vi.fn(async () => ({ text: 'perplexity-response', provider: 'perplexity', model: 'sonar' })),
-}));
 
 /** Two samples of silence — valid PCM, and trivially cheap to encode. */
 const PCM_BASE64 = Buffer.alloc(4).toString('base64');

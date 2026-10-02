@@ -16,8 +16,6 @@ vi.mock('../../lib/firebase-admin', () => import('../helpers/mockFirebaseAdmin')
 vi.mock('../../lib/providers/gemini', () => ({
   askGemini: vi.fn(async () => ({ text: 'gemini-response', provider: 'gemini', model: 'm' })),
 }));
-vi.mock('../../lib/providers/openai', () => ({ askOpenAI: vi.fn(async () => ({ text: 'openai' })) }));
-vi.mock('../../lib/providers/perplexity', () => ({ askPerplexity: vi.fn(async () => ({ text: 'pplx' })) }));
 
 describe('POST /api/ask-ai — paused limits must not choose the model', () => {
   const ORIGINAL = process.env.LIMITS_ENFORCED;

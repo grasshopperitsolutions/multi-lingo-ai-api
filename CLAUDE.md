@@ -13,13 +13,13 @@ Avoid `coverage/`, `node_modules/`, generated output, and unrelated endpoints un
 
 ## What this is
 
-A consolidated Vercel serverless API acting as a proxy in front of Firebase (Auth/Firestore/Storage), Stripe, and AI providers (OpenAI/Gemini/Perplexity) for the Multi-Lingo AI frontend. The frontend never talks to Firebase directly — `firestore.rules` denies all client reads/writes unconditionally, since every operation must go through this proxy using the Firebase Admin SDK (which bypasses those rules). This is the sole enforcement point for authorization.
+A consolidated Vercel serverless API acting as a proxy in front of Firebase (Auth/Firestore/Storage), Stripe, and Gemini (the only AI provider) for the Multi-Lingo AI frontend. The frontend never talks to Firebase directly — `firestore.rules` denies all client reads/writes unconditionally, since every operation must go through this proxy using the Firebase Admin SDK (which bypasses those rules). This is the sole enforcement point for authorization.
 
 There are exactly 7 endpoints, each a separate Vercel serverless function (120s max duration, see `vercel.json`; the account is on Vercel Pro, so the ceiling is 800s if one ever needs it):
 - `api/auth.ts` — sign-in (Google; Apple/Facebook/X recognized but return 501), logout, account deletion, and the browser's usage counts for Admin › Pulse (`action: "pulse"`)
 - `api/firestore.ts` — generic CRUD proxy over all Firestore collections
 - `api/storage.ts` — signed-URL upload/download and file metadata via Cloud Storage
-- `api/ask-ai.ts` — proxies chat/completion requests to OpenAI, Gemini, or Perplexity
+- `api/ask-ai.ts` — proxies chat/completion requests to Gemini (the only provider; any other `providerParams.provider` is a 400)
 - `api/stripe.ts` — Checkout/Billing Portal sessions plus the Stripe webhook
 - `api/email.ts` — contact form and admin broadcast (POST), plus the nightly unread-report digest (GET, cron)
 - `api/live-token.ts` — mints an ephemeral Gemini token so the browser can open a Live API session directly
@@ -83,9 +83,9 @@ Every handler in `api/*.ts` follows the same shape: `setCorsHeaders` + `handleCo
 
 ### AI provider layer
 
-`api/ask-ai.ts` handles quota enforcement and request-size caps, then dispatches to `lib/providers/{openai,gemini,perplexity}.ts` based on `providerParams.provider`.
+`api/ask-ai.ts` handles quota enforcement and request-size caps, then calls `lib/providers/gemini.ts`. `providerParams.provider` must be `'gemini'`; any other value is a 400 "Unsupported provider", never a fallback to another vendor. The provider module stays a thin adapter, so adding a provider means a module here and a case in `api/ask-ai.ts`.
 
-**Daily allowances come from `appConfig/config/tiersConfig`, not from constants here.** That document is what the Tiers screen edits and what the whole frontend already derives from — the pricing page, the usage meter, the confirm dialog. `aiCallsPerDay` absent or null means unlimited, which is how Maestro passes through: the Tiers screen writes `Infinity`, JSON has no Infinity, so it arrives and is stored as null, and both sides read it back as "no limit". A configured `0` is honoured as zero rather than read as absent. `FALLBACK_DAILY_LIMITS` (Explorer 3, Voyager 20) applies only when config cannot be read or does not name the tier — falling back to *unlimited* there would hand out an unmetered paid key on a Firestore hiccup. `LIMITS_ENFORCED=false` still disables the whole gate. This used to be two hardcoded constants, which meant an admin lowering a limit changed every number the user saw and none of what the server allowed. Each provider module is a thin, independently swappable adapter; adding a provider means adding a module here and a case in the `api/ask-ai.ts` switch.
+**Daily allowances come from `appConfig/config/tiersConfig`, not from constants here.** That document is what the Tiers screen edits and what the whole frontend already derives from — the pricing page, the usage meter, the confirm dialog. `aiCallsPerDay` absent or null means unlimited, which is how Maestro passes through: the Tiers screen writes `Infinity`, JSON has no Infinity, so it arrives and is stored as null, and both sides read it back as "no limit". A configured `0` is honoured as zero rather than read as absent. `FALLBACK_DAILY_LIMITS` (Explorer 3, Voyager 20) applies only when config cannot be read or does not name the tier — falling back to *unlimited* there would hand out an unmetered paid key on a Firestore hiccup. `LIMITS_ENFORCED=false` still disables the whole gate. This used to be two hardcoded constants, which meant an admin lowering a limit changed every number the user saw and none of what the server allowed.
 
 **The counter is checked and incremented in one Firestore transaction**, read fresh inside it. It used to be read off the profile fetched at the top of the request and written back later, so several calls fired at once all read the same number, all got through, and raised the counter by one. A counted call returns `usage` (`aiCallsToday`, `aiCallsDate`, `aiCallsPerDay`) in its data, so the frontend's meter shows the server's number. Hitting the limit is a 429 with `code: 'DAILY_LIMIT'` and the same `usage`, which lets the frontend show its own translated message: a provider's rate limit is also a 429, and the English `error` text is only for other callers. Uncounted calls (unlimited tiers, maintenance, paused limits) send no `usage`.
 

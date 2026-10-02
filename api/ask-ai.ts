@@ -1,8 +1,6 @@
 import { handleCors, setCorsHeaders } from '../lib/cors';
 import { successResponse, errorResponse } from '../lib/response';
 import { verifyAuth } from '../lib/verify-auth';
-import { askOpenAI } from '../lib/providers/openai';
-import { askPerplexity } from '../lib/providers/perplexity';
 import { askGemini } from '../lib/providers/gemini';
 import { bump, resolveKnownId, safeKey } from '../lib/pulse';
 import { db, FieldValue } from '../lib/firebase-admin';
@@ -128,7 +126,7 @@ const ALLOWED_AUDIO_MIME = [
  *   treated as Explorer for display purposes but no requests are ever blocked.
  *   Useful during testing/beta.
  * Otherwise (default) → tier-based daily quotas are active (Explorer: 3/day, Voyager: 20/day).
- * This proxy holds paid OpenAI/Gemini/Perplexity API keys, so the default must be
+ * This proxy holds a paid Gemini API key, so the default must be
  * "enforced" — an unset env var previously meant unlimited usage for anyone.
  * Flip this env var in Vercel dashboard — no code changes needed.
  */
@@ -473,6 +471,14 @@ async function _handleAskAI(
   if (!body?.providerParams?.provider) {
     return errorResponse(res, 'Missing required field: providerParams.provider', 400);
   }
+  // Gemini is the only AI provider. An unknown value is refused outright: it
+  // used to fall through to OpenAI, so a typo in `provider` quietly billed a
+  // different vendor. It also covers images and audio, which only Gemini reads,
+  // so a request can no longer get a confident answer about a picture or a
+  // recording the provider never received.
+  if (body.providerParams.provider !== 'gemini') {
+    return errorResponse(res, 'Unsupported provider', 400);
+  }
   if (!body?.prompt && (!body?.messages || body.messages.length === 0)) {
     return errorResponse(res, 'Provide either prompt or a non-empty messages array', 400);
   }
@@ -488,12 +494,6 @@ async function _handleAskAI(
   if (body.images) {
     if (!Array.isArray(body.images) || body.images.length > MAX_IMAGES) {
       return errorResponse(res, `images must be an array of at most ${MAX_IMAGES} entries`, 400);
-    }
-    // Only Gemini is wired for this. Silently dropping the images on another
-    // provider would return a confident answer about a picture it never saw,
-    // which reads as a bad model rather than an unsupported request.
-    if (body.images.length > 0 && body.providerParams.provider !== 'gemini') {
-      return errorResponse(res, 'images are only supported by the gemini provider', 400);
     }
     for (const image of body.images) {
       if (typeof image?.data !== 'string' || image.data.length === 0) {
@@ -514,12 +514,6 @@ async function _handleAskAI(
   if (body.audio) {
     if (!Array.isArray(body.audio) || body.audio.length > MAX_AUDIO_CLIPS) {
       return errorResponse(res, `audio must be an array of at most ${MAX_AUDIO_CLIPS} entry`, 400);
-    }
-    // Same reasoning as images: a provider that cannot hear would answer from
-    // the prompt alone and produce confident feedback about a recording it
-    // never received.
-    if (body.audio.length > 0 && body.providerParams.provider !== 'gemini') {
-      return errorResponse(res, 'audio is only supported by the gemini provider', 400);
     }
     for (const clip of body.audio) {
       if (typeof clip?.data !== 'string' || clip.data.length === 0) {
@@ -571,19 +565,7 @@ async function _handleAskAI(
   });
 
   try {
-    let result;
-    switch (provider) {
-      case 'perplexity':
-        result = await askPerplexity(prompt, providerParams, messages);
-        break;
-      case 'gemini':
-        result = await askGemini(prompt, providerParams, messages, images, audio);
-        break;
-      case 'openai':
-      default:
-        result = await askOpenAI(prompt, providerParams, messages);
-        break;
-    }
+    let result = await askGemini(prompt, providerParams, messages, images, audio);
 
     // ── Compress, then keep ──────────────────────────────────────────────
     //

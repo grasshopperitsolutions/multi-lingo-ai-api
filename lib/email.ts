@@ -7,9 +7,8 @@
  * shape as lib/providers/*.ts; swapping provider means rewriting only the
  * body of sendEmail().
  *
- * Env is read lazily inside the functions (the lib/providers/perplexity.ts
- * pattern) rather than asserted at module load (the lib/stripe.ts pattern),
- * so importing this module in a test needs no env setup.
+ * Env is read lazily inside the functions rather than asserted at module load
+ * (the lib/stripe.ts pattern), so importing this module in a test needs no env setup.
  */
 
 import { logInfo, logWarn } from './logger';
